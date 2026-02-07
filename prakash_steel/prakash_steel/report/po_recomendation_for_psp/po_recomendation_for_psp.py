@@ -1295,6 +1295,24 @@ def get_data(filters=None):
 	remaining_child_stock_fifo = {}
 	remaining_child_wip_open_po_fifo = {}
 
+	# Group rows by parent item_code for allocation validation
+	# We need to check if ALL children of a parent can be allocated before allocating any
+	parent_child_groups = {}
+	for row in sku_filtered_data:
+		parent_item_code = row.get("item_code")
+		child_item_code = row.get("child_item_code")
+		if parent_item_code and child_item_code:
+			if parent_item_code not in parent_child_groups:
+				parent_child_groups[parent_item_code] = []
+			parent_child_groups[parent_item_code].append(row)
+
+	# Process allocations: For each parent, check if ALL children can be allocated
+	# If ANY child cannot be fully allocated, set ALL children allocations to 0
+	# This ensures we only allocate when we can produce the complete parent item
+	# Process parents in order to maintain FIFO
+	
+	# First, process all rows to calculate tentative allocations (without updating FIFO)
+	# Store allocations temporarily
 	for row in sku_filtered_data:
 		child_item_code = row.get("child_item_code")
 		if child_item_code:
@@ -1350,17 +1368,8 @@ def get_data(filters=None):
 			row["child_stock_soft_allocation_qty"] = math.ceil(stock_allocated)
 			row["child_stock_shortage"] = math.ceil(stock_shortage)
 
-			# Convert allocated CHILD stock qty into PARENT production qty using BOM ratio:
-			# Parent units per 1 child unit = BOM Qty / BOM Item Qty (inverse of requirement calc)
-			# Forward: Parent → Child uses (child_bom_qty / child_bom_quantity)
-			# Backward: Child → Parent uses (child_bom_quantity / child_bom_qty)
-			child_bom_qty = flt(row.get("child_bom_qty", 0))
-			child_bom_quantity = flt(row.get("child_bom_quantity", 1.0)) or 1.0
-			# Use inverse ratio to convert child stock back to parent production qty
-			parent_per_child_factor = (child_bom_quantity / child_bom_qty) if child_bom_qty else 0
-
-			production_qty_based_on_child_stock = math.ceil(flt(stock_allocated) * parent_per_child_factor)
-			row["production_qty_based_on_child_stock"] = production_qty_based_on_child_stock
+			# Store tentative allocations (don't calculate production qty yet)
+			# Production qty will be calculated after minimum allocation logic is applied
 
 			# Apply FIFO allocation for WIP/Open PO against remaining requirement (after stock allocation)
 			# IMPORTANT: This uses GLOBAL remaining WIP/Open PO across ALL parent items
@@ -1392,15 +1401,7 @@ def get_data(filters=None):
 			else:
 				row["child_wip_open_po_full_kit_status"] = "Partial"
 
-			# Calculate Production qty based on child stock+WIP/Open PO
-			# Start from total CHILD qty allocated (stock + WIP/Open PO) and convert to PARENT qty
-			total_allocated = flt(stock_allocated) + flt(wip_open_po_allocated)
-			production_qty_based_on_child_stock_wip_open_po = math.ceil(
-				total_allocated * parent_per_child_factor
-			)
-			row["production_qty_based_on_child_stock_wip_open_po"] = (
-				production_qty_based_on_child_stock_wip_open_po
-			)
+			# Production qty will be calculated after minimum allocation logic
 
 			# Calculate Child Stock Full-kit Status
 			# IMPORTANT:
@@ -1422,57 +1423,178 @@ def get_data(filters=None):
 			else:
 				row["child_full_kit_status"] = "Partial"
 
-			# Update remaining stock for this child item (FIFO - reduce by allocated amount)
-			remaining_child_stock_fifo[child_item_code] = available_stock - stock_allocated
-			# Update remaining WIP/Open PO for this child item (FIFO - reduce by allocated amount)
-			remaining_child_wip_open_po_fifo[child_item_code] = available_wip_open_po - wip_open_po_allocated
+			# Store tentative allocations (don't update FIFO yet)
+			# We'll update FIFO only after validating all children of the parent can be allocated
+			row["_tentative_stock_allocated"] = stock_allocated
+			row["_tentative_wip_open_po_allocated"] = wip_open_po_allocated
+			row["_tentative_stock_shortage"] = stock_shortage
+			row["_tentative_wip_open_po_shortage"] = wip_open_po_shortage
+			row["_child_requirement"] = child_requirement
+			row["_available_stock"] = available_stock
+			row["_available_wip_open_po"] = available_wip_open_po
 
-	# Apply minimum production quantities across all children for each parent item
-	# Group rows by parent item_code (use sku_filtered_data to include all parents before item_code filter)
-	parent_groups = {}
+	# Now validate and apply allocations per parent
+	# For each parent, check if ALL children can be fully allocated
+	# If ANY child has shortage, set ALL children allocations to 0
+	# Process parents in the order they appear in sku_filtered_data to maintain FIFO
+	processed_parents = set()
 	for row in sku_filtered_data:
 		parent_item_code = row.get("item_code")
-		child_item_code = row.get("child_item_code")
-
-		# Only process rows that have child items
-		if child_item_code and parent_item_code:
-			if parent_item_code not in parent_groups:
-				parent_groups[parent_item_code] = []
-			parent_groups[parent_item_code].append(row)
-
-	# For each parent, find minimum production quantities and apply to all child rows
-	for parent_item_code, child_rows in parent_groups.items():
+		if not parent_item_code or parent_item_code in processed_parents:
+			continue
+		if parent_item_code not in parent_child_groups:
+			continue
+		
+		processed_parents.add(parent_item_code)
+		child_rows = parent_child_groups[parent_item_code]
 		if not child_rows:
 			continue
-
-		# Find minimum production_qty_based_on_child_stock across all children
-		min_production_qty_stock = None
+		
+		# Find minimum total allocation (stock + WIP/Open PO) across all children
+		# This represents the limiting child - we can only allocate this much to all children
+		# You can only produce as many parent items as the limiting child allows
+		min_total_allocated = None
+		for child_row in child_rows:
+			tentative_stock = child_row.get("_tentative_stock_allocated", 0)
+			tentative_wip = child_row.get("_tentative_wip_open_po_allocated", 0)
+			total_allocated = tentative_stock + tentative_wip
+			
+			if min_total_allocated is None:
+				min_total_allocated = total_allocated
+			else:
+				min_total_allocated = min(min_total_allocated, total_allocated)
+		
+		# If no valid allocation found, set to 0
+		if min_total_allocated is None:
+			min_total_allocated = 0
+		
+		# Apply minimum allocation to all children
+		# IMPORTANT: Maximize stock allocation first, then use WIP/Open PO to reach the minimum total
+		# The minimum represents the total (stock + WIP/Open PO) that ALL children can get
 		for row in child_rows:
-			production_qty_stock = row.get("production_qty_based_on_child_stock")
-			if production_qty_stock is not None:
-				if min_production_qty_stock is None:
-					min_production_qty_stock = production_qty_stock
+			child_item_code = row.get("child_item_code")
+			child_requirement = row.get("_child_requirement", 0)
+			tentative_stock = row.get("_tentative_stock_allocated", 0)
+			tentative_wip = row.get("_tentative_wip_open_po_allocated", 0)
+			available_stock = row.get("_available_stock", 0)
+			available_wip_open_po = row.get("_available_wip_open_po", 0)
+			tentative_total = tentative_stock + tentative_wip
+			
+			if tentative_total > 0 and min_total_allocated > 0:
+				# If tentative total is already <= minimum, keep it as is
+				if tentative_total <= min_total_allocated:
+					stock_allocated = tentative_stock
+					wip_open_po_allocated = tentative_wip
 				else:
-					min_production_qty_stock = min(min_production_qty_stock, production_qty_stock)
+					# Need to reduce to match minimum
+					# Strategy: Maximize stock allocation first, then use WIP/Open PO
+					# 1. Use as much stock as possible (up to available stock and requirement)
+					stock_allocated = min(min_total_allocated, available_stock, child_requirement)
+					
+					# 2. Fill remaining with WIP/Open PO
+					remaining_for_wip = min_total_allocated - stock_allocated
+					if remaining_for_wip > 0:
+						# Calculate remaining requirement after stock allocation
+						remaining_requirement = child_requirement - stock_allocated
+						wip_open_po_allocated = min(remaining_for_wip, remaining_requirement, available_wip_open_po)
+					else:
+						wip_open_po_allocated = 0
+					
+					# Ensure total matches minimum (handle rounding/edge cases)
+					actual_total = stock_allocated + wip_open_po_allocated
+					if actual_total < min_total_allocated:
+						# Try to add more from WIP/Open PO first, then stock
+						diff = min_total_allocated - actual_total
+						remaining_requirement = child_requirement - stock_allocated
+						if available_wip_open_po > wip_open_po_allocated and remaining_requirement > wip_open_po_allocated:
+							# Can add more WIP/Open PO
+							additional_wip = min(diff, available_wip_open_po - wip_open_po_allocated, remaining_requirement - wip_open_po_allocated)
+							wip_open_po_allocated += additional_wip
+							diff -= additional_wip
+						
+						# If still short, try to add more stock (if available)
+						if diff > 0 and available_stock > stock_allocated:
+							additional_stock = min(diff, available_stock - stock_allocated, child_requirement - stock_allocated)
+							stock_allocated += additional_stock
+			else:
+				# No tentative allocation or minimum is 0, so final is also 0
+				stock_allocated = 0
+				wip_open_po_allocated = 0
+			
+			# Calculate shortages
+			stock_shortage = child_requirement - stock_allocated
+			remaining_requirement_after_stock = stock_shortage
+			wip_open_po_shortage = remaining_requirement_after_stock - wip_open_po_allocated
+			
+			# Update FIFO dictionaries only with the actual allocated amounts
+			available_stock = row.get("_available_stock", 0)
+			available_wip_open_po = row.get("_available_wip_open_po", 0)
+			remaining_child_stock_fifo[child_item_code] = available_stock - stock_allocated
+			remaining_child_wip_open_po_fifo[child_item_code] = available_wip_open_po - wip_open_po_allocated
+			
+			# Update row with final allocations
+			row["child_stock_soft_allocation_qty"] = math.ceil(stock_allocated)
+			row["child_stock_shortage"] = math.ceil(stock_shortage)
+			row["child_wip_open_po_soft_allocation_qty"] = math.ceil(wip_open_po_allocated)
+			row["child_wip_open_po_shortage"] = math.ceil(wip_open_po_shortage)
+			
+			# Recalculate production quantities with final allocations
+			# Use the final stock_allocated and wip_open_po_allocated values from minimum allocation logic
+			child_bom_qty = flt(row.get("child_bom_qty", 0))
+			child_bom_quantity = flt(row.get("child_bom_quantity", 1.0)) or 1.0
+			
+			if child_bom_qty > 0:
+				parent_per_child_factor = child_bom_quantity / child_bom_qty
+			else:
+				# Invalid BOM data - log error
+				frappe.log_error(
+					f"Missing BOM data for child {child_item_code} in parent {parent_item_code}. "
+					f"Cannot calculate production qty.",
+					"PO Recommendation - Missing BOM Data"
+				)
+				parent_per_child_factor = 0
+			
+			# Production qty based on child stock only
+			production_qty_based_on_child_stock = math.ceil(flt(stock_allocated) * parent_per_child_factor)
+			row["production_qty_based_on_child_stock"] = production_qty_based_on_child_stock
+			
+			# Production qty based on child stock + WIP/Open PO
+			total_allocated = flt(stock_allocated) + flt(wip_open_po_allocated)
+			production_qty_based_on_child_stock_wip_open_po = math.ceil(
+				total_allocated * parent_per_child_factor
+			)
+			row["production_qty_based_on_child_stock_wip_open_po"] = (
+				production_qty_based_on_child_stock_wip_open_po
+			)
+			
+			# Update full-kit status based on final allocations
+			net_order_recommendation = flt(row.get("or_with_moq_batch_size", 0))
+			order_recommendation = flt(row.get("order_recommendation", 0))
+			
+			# Child WIP/Open PO Full-kit Status
+			if flt(net_order_recommendation) == 0:
+				row["child_wip_open_po_full_kit_status"] = None
+			elif flt(wip_open_po_shortage) == 0:
+				row["child_wip_open_po_full_kit_status"] = "Full-kit"
+			elif flt(wip_open_po_allocated) == 0:
+				row["child_wip_open_po_full_kit_status"] = "Pending"
+			else:
+				row["child_wip_open_po_full_kit_status"] = "Partial"
+			
+			# Child Stock Full-kit Status
+			if flt(order_recommendation) == 0:
+				row["child_full_kit_status"] = None
+			elif flt(stock_shortage) == 0:
+				row["child_full_kit_status"] = "Full-kit"
+			elif flt(stock_allocated) == 0:
+				row["child_full_kit_status"] = "Pending"
+			else:
+				row["child_full_kit_status"] = "Partial"
 
-		# Find minimum production_qty_based_on_child_stock_wip_open_po across all children
-		min_production_qty_stock_wip_open_po = None
-		for row in child_rows:
-			production_qty_stock_wip = row.get("production_qty_based_on_child_stock_wip_open_po")
-			if production_qty_stock_wip is not None:
-				if min_production_qty_stock_wip_open_po is None:
-					min_production_qty_stock_wip_open_po = production_qty_stock_wip
-				else:
-					min_production_qty_stock_wip_open_po = min(
-						min_production_qty_stock_wip_open_po, production_qty_stock_wip
-					)
-
-		# Apply minimum values to all child rows of this parent
-		for row in child_rows:
-			if min_production_qty_stock is not None:
-				row["production_qty_based_on_child_stock"] = min_production_qty_stock
-			if min_production_qty_stock_wip_open_po is not None:
-				row["production_qty_based_on_child_stock_wip_open_po"] = min_production_qty_stock_wip_open_po
+	# Production quantities are already calculated correctly in the minimum allocation logic above
+	# No need to recalculate or overwrite them here
+	# The minimum allocation logic ensures all children get the same total allocation,
+	# and production qty is calculated from those allocations
 
 	# Apply item_code filter AFTER FIFO allocation (for display only)
 	# This ensures FIFO allocation is correct even when filtering by item_code
