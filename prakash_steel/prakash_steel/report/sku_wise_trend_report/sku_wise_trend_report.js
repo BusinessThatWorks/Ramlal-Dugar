@@ -25,7 +25,7 @@ frappe.query_reports["SKU wise Trend Report"] = {
 			fieldtype: "Select",
 			width: "80",
 			reqd: 1,
-			options: "BBMTA\nRBMTA\nPTA\nBOTA\nTRMTA",
+			options: "FGMTA\nSFGMTA\nPTA",
 		},
 		{
 			fieldname: "item_code",

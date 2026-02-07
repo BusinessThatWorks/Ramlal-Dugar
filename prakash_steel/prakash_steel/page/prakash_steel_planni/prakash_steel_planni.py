@@ -9,25 +9,21 @@ from frappe.utils import flt
 
 def calculate_sku_type(buffer_flag, item_type):
 	"""
-	Same mapping logic as calculate_sku_type in production_order_recomendation.py
-	buffer_flag: 'Buffer' or other
-	item_type: 'BB', 'RB', 'BO', 'RM', 'Traded'
+	Same mapping logic as calculate_sku_type in po_recomendation_for_psp.py
+	buffer_flag: 'Buffer' or 'Non-Buffer'
+	item_type: 'FG', 'INT', 'RAW'
 	"""
 	if not item_type:
 		return None
 
 	is_buffer = buffer_flag == "Buffer"
 
-	if item_type == "BB":
-		return "BBMTA" if is_buffer else "BBMTO"
-	elif item_type == "RB":
-		return "RBMTA" if is_buffer else "RBMTO"
-	elif item_type == "BO":
-		return "BOTA" if is_buffer else "BOTO"
-	elif item_type == "RM":
+	if item_type == "FG":
+		return "FGMTA" if is_buffer else "FGMTO"
+	elif item_type == "INT":
+		return "SFGMTA" if is_buffer else "SFGMTO"
+	elif item_type == "RAW":
 		return "PTA" if is_buffer else "PTO"
-	elif item_type == "Traded":
-		return "TRMTA" if is_buffer else "TRMTO"
 
 	return None
 
@@ -48,7 +44,7 @@ def get_sku_type_on_hand_status(filters=None):
 	if not filters:
 		filters = {}
 
-	# Get ALL buffer items - same as po_recomendation_for_psp report
+	# Get ALL buffer items - count all buffer items regardless of SO/PO/WIP
 	items_data = frappe.db.sql(
 		"""
 		SELECT
@@ -64,7 +60,7 @@ def get_sku_type_on_hand_status(filters=None):
 		as_dict=1,
 	)
 
-	print(f"[PLANNING DASHBOARD] Found {len(items_data)} buffer items")
+	print(f"[PLANNING DASHBOARD] Found {len(items_data)} buffer items (all buffer items)")
 
 	if not items_data:
 		return {}
@@ -101,11 +97,11 @@ def get_sku_type_on_hand_status(filters=None):
 
 	for item in items_data:
 		item_code = item.item_code
-		buffer_flag = item.get("buffer_flag") or "Non-Buffer"
+		buffer_flag = item.get("buffer_flag") or "Buffer"
 		item_type = item.get("item_type")
 		
-		# Calculate SKU type exactly as report does (all items are buffer, so use "Buffer" flag)
-		sku_type = calculate_sku_type("Buffer", item_type)
+		# Calculate SKU type using actual buffer_flag from item
+		sku_type = calculate_sku_type(buffer_flag, item_type)
 		
 		# Count by SKU type
 		if sku_type:
@@ -121,10 +117,40 @@ def get_sku_type_on_hand_status(filters=None):
 		})
 
 	print(f"[PLANNING DASHBOARD] Items by SKU type: {sku_type_counts}")
+	
+	# Debug: Count items by item_type to see what values are in database
+	item_type_counts = {}
+	for item in items_data:
+		item_type = item.get("item_type") or "None"
+		item_type_counts[item_type] = item_type_counts.get(item_type, 0) + 1
+	print(f"[PLANNING DASHBOARD] Items by item_type (from DB): {item_type_counts}")
 
-	# Now filter to only the SKU types we want for charts: BBMTA, RBMTA, BOTA, RMTA, PTA
-	# But handle RM buffer items: they calculate as PTA but should display as RMTA
-	target_sku_types = ["BBMTA", "RBMTA", "BOTA", "RMTA", "PTA"]
+	# Debug: List all items with their SKU type calculation
+	print(f"\n[PLANNING DASHBOARD] ====== DETAILED ITEM BREAKDOWN ======")
+	for item in items_with_sku_type:
+		item_code = item["item_code"]
+		item_type = item.get("item_type") or "None"
+		buffer_flag = item.get("buffer_flag") or "Buffer"
+		sku_type = item.get("sku_type") or "None"
+		print(f"[PLANNING DASHBOARD] Item: {item_code} | item_type: '{item_type}' | buffer_flag: '{buffer_flag}' | calculated_sku_type: '{sku_type}'")
+	print(f"[PLANNING DASHBOARD] ====== END ITEM BREAKDOWN ======\n")
+
+	# Now filter to only the SKU types we want for charts: FGMTA, SFGMTA, PTA
+	target_sku_types = ["FGMTA", "SFGMTA", "PTA"]
+	
+	# Debug: Show which items are included for each target SKU type
+	print(f"[PLANNING DASHBOARD] ====== ITEMS BY TARGET SKU TYPE ======")
+	for target_sku in target_sku_types:
+		matching_items = [item for item in items_with_sku_type if item.get("sku_type") == target_sku]
+		print(f"[PLANNING DASHBOARD] {target_sku}: {len(matching_items)} items")
+		if len(matching_items) <= 50:
+			for idx, item in enumerate(matching_items, 1):
+				print(f"[PLANNING DASHBOARD]   {idx}. {item['item_code']} (item_type: '{item.get('item_type')}', buffer_flag: '{item.get('buffer_flag')}')")
+		else:
+			for idx, item in enumerate(matching_items[:50], 1):
+				print(f"[PLANNING DASHBOARD]   {idx}. {item['item_code']} (item_type: '{item.get('item_type')}', buffer_flag: '{item.get('buffer_flag')}')")
+			print(f"[PLANNING DASHBOARD]   ... and {len(matching_items) - 50} more items")
+	print(f"[PLANNING DASHBOARD] ====== END ITEMS BY TARGET SKU TYPE ======\n")
 	
 	# Group items by SKU type and calculate on-hand status
 	sku_type_data = {}
@@ -140,19 +166,15 @@ def get_sku_type_on_hand_status(filters=None):
 		if not sku_type:
 			continue
 
-		# Map RM buffer items to RMTA for display (even though code logic uses PTA)
-		# User wants to see RMTA in the dashboard
-		display_sku_type = sku_type
-		if sku_type == "PTA" and item_type == "RM" and buffer_flag == "Buffer":
-			display_sku_type = "RMTA"
-
 		# Only process target SKU types
-		if display_sku_type not in target_sku_types:
+		if sku_type not in target_sku_types:
+			if sku_type:  # Only log if SKU type exists (to avoid logging None items)
+				print(f"[PLANNING DASHBOARD] Skipping {item_code}: SKU type '{sku_type}' not in target list {target_sku_types}")
 			continue
 
 		# Initialize SKU type if not exists
-		if display_sku_type not in sku_type_data:
-			sku_type_data[display_sku_type] = {
+		if sku_type not in sku_type_data:
+			sku_type_data[sku_type] = {
 				"BLACK": {"count": 0, "items": []},
 				"RED": {"count": 0, "items": []},
 				"YELLOW": {"count": 0, "items": []},
@@ -197,7 +219,7 @@ def get_sku_type_on_hand_status(filters=None):
 
 		# Log calculation for this item
 		calc_detail = (
-			f"Item: {item_code} | SKU: {display_sku_type} (calc: {sku_type}) | "
+			f"Item: {item_code} | SKU: {sku_type} | "
 			f"Stock: {on_hand_stock} | TOG: {tog} | Qualify_Demand: {qualify_demand} | "
 			f"Denominator: {denominator} | On_Hand_Value: {on_hand_status_value} | "
 			f"Numeric_Status: {numeric_status} | Colour: {on_hand_colour or 'BLACK (None)'}"
@@ -207,9 +229,9 @@ def get_sku_type_on_hand_status(filters=None):
 		# Count items by colour - ALWAYS count every item
 		# If on_hand_colour is None (numeric_status is None), count as BLACK
 		final_colour = on_hand_colour if on_hand_colour else "BLACK"
-		if final_colour in sku_type_data[display_sku_type]:
-			sku_type_data[display_sku_type][final_colour]["count"] += 1
-			sku_type_data[display_sku_type][final_colour]["items"].append(item_code)
+		if final_colour in sku_type_data[sku_type]:
+			sku_type_data[sku_type][final_colour]["count"] += 1
+			sku_type_data[sku_type][final_colour]["items"].append(item_code)
 
 
 	# Count items by colour for each SKU type for debugging
@@ -217,13 +239,30 @@ def get_sku_type_on_hand_status(filters=None):
 		colour_counts = {colour: data["count"] for colour, data in colour_data.items()}
 		print(f"[PLANNING DASHBOARD] {sku_type} colour counts: {colour_counts}")
 		
-		# Print all BLACK items for BBMTA
-		if sku_type == "BBMTA" and "BLACK" in colour_data:
+		# Print all BLACK items for FGMTA
+		if sku_type == "FGMTA" and "BLACK" in colour_data:
 			black_items = colour_data["BLACK"]["items"]
-			print(f"[PLANNING DASHBOARD] ====== BBMTA BLACK Items ({len(black_items)} total) ======")
+			print(f"[PLANNING DASHBOARD] ====== FGMTA BLACK Items ({len(black_items)} total) ======")
 			for idx, item_code in enumerate(black_items, 1):
 				print(f"[PLANNING DASHBOARD] {idx}. {item_code}")
-			print(f"[PLANNING DASHBOARD] ====== End BBMTA BLACK Items ======")
+			print(f"[PLANNING DASHBOARD] ====== End FGMTA BLACK Items ======")
+		
+		# Debug: Print PTA items to verify count
+		if sku_type == "PTA":
+			total_pta = sum(colour_data[colour]["count"] for colour in colour_data.keys())
+			print(f"[PLANNING DASHBOARD] ====== PTA Total Items: {total_pta} ======")
+			for colour_name in ["BLACK", "RED", "YELLOW", "GREEN", "WHITE"]:
+				if colour_name in colour_data and colour_data[colour_name]["count"] > 0:
+					pta_items = colour_data[colour_name]["items"]
+					print(f"[PLANNING DASHBOARD] PTA {colour_name}: {colour_data[colour_name]['count']} items")
+					if len(pta_items) <= 10:
+						for idx, item_code in enumerate(pta_items, 1):
+							print(f"[PLANNING DASHBOARD]   {idx}. {item_code}")
+					else:
+						for idx, item_code in enumerate(pta_items[:10], 1):
+							print(f"[PLANNING DASHBOARD]   {idx}. {item_code}")
+						print(f"[PLANNING DASHBOARD]   ... and {len(pta_items) - 10} more")
+			print(f"[PLANNING DASHBOARD] ====== End PTA Items ======")
 	
 	# Log first 20 item calculations (to avoid too much logging)
 	if item_calc_log:
@@ -441,3 +480,69 @@ def get_open_po_status():
 			}
 		],
 	}
+
+
+@frappe.whitelist()
+def verify_sku_type_counts():
+	"""
+	Verify the counts for each SKU type to help debug dashboard numbers.
+	Returns detailed breakdown of how items are being counted.
+	"""
+	# Get ALL buffer items
+	items_data = frappe.db.sql(
+		"""
+		SELECT
+			i.name as item_code,
+			i.custom_buffer_flag as buffer_flag,
+			i.custom_item_type as item_type
+		FROM
+			`tabItem` i
+		WHERE
+			i.custom_buffer_flag = 'Buffer'
+		ORDER BY
+			i.custom_item_type, i.name
+		""",
+		as_dict=1,
+	)
+
+	# Count by item_type (raw database values)
+	item_type_counts = {}
+	for item in items_data:
+		item_type = item.get("item_type") or "None"
+		item_type_counts[item_type] = item_type_counts.get(item_type, 0) + 1
+
+	# Calculate SKU types and count
+	sku_type_counts = {}
+	sku_type_items = {}
+	target_sku_types = ["FGMTA", "SFGMTA", "PTA"]
+	
+	for item in items_data:
+		item_code = item.item_code
+		buffer_flag = item.get("buffer_flag") or "Buffer"
+		item_type = item.get("item_type")
+		
+		sku_type = calculate_sku_type(buffer_flag, item_type)
+		
+		if sku_type:
+			if sku_type not in sku_type_counts:
+				sku_type_counts[sku_type] = 0
+				sku_type_items[sku_type] = []
+			sku_type_counts[sku_type] += 1
+			sku_type_items[sku_type].append(item_code)
+
+	# Build result
+	result = {
+		"total_buffer_items": len(items_data),
+		"items_by_item_type": item_type_counts,
+		"items_by_sku_type": sku_type_counts,
+		"target_sku_types": {}
+	}
+	
+	for sku_type in target_sku_types:
+		count = sku_type_counts.get(sku_type, 0)
+		result["target_sku_types"][sku_type] = {
+			"count": count,
+			"items": sku_type_items.get(sku_type, [])[:50]  # Limit to first 50 for response size
+		}
+
+	return result

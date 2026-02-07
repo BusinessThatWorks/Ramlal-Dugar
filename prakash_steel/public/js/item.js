@@ -596,9 +596,12 @@ function calculate_sku_type(frm) {
     // Store the current dirty state before updating
     const was_dirty = frm.is_dirty();
 
-    // Get buffer flag and item type
+    // Get buffer flag and item group
     const buffer_flag = frm.doc.custom_buffer_flag || 'Non-Buffer'; // Default to Non-Buffer
     const item_type = frm.doc.custom_item_type;
+
+    // Debug: Log the item_type value to help troubleshoot
+    console.log('[SKU Type Calculation] item_type:', item_type, 'buffer_flag:', buffer_flag);
 
     // Calculate the new SKU type
     let new_sku_type = null;
@@ -607,18 +610,21 @@ function calculate_sku_type(frm) {
         // Determine if buffer or non-buffer (default to non-buffer)
         const is_buffer = buffer_flag === 'Buffer';
 
+        // Normalize item_type for comparison (trim and handle case variations)
+        const normalized_item_type = (item_type || '').toString().trim().toUpperCase();
+        
+        console.log('[SKU Type Calculation] normalized_item_type:', normalized_item_type, 'is_buffer:', is_buffer);
+
         // Calculate SKU type based on buffer flag and item type
-        if (item_type === 'BB') {
-            new_sku_type = is_buffer ? 'BBMTA' : 'BBMTO';
-        } else if (item_type === 'RB') {
-            new_sku_type = is_buffer ? 'RBMTA' : 'RBMTO';
-        } else if (item_type === 'BO') {
-            new_sku_type = is_buffer ? 'BOTA' : 'BOTO';
-        } else if (item_type === 'RM') {
+        if (normalized_item_type === 'FG') {
+            new_sku_type = is_buffer ? 'FGMTA' : 'FGMTO';
+        } else if (normalized_item_type === 'INT') {
+            new_sku_type = is_buffer ? 'SFGMTA' : 'SFGMTO';
+        } else if (normalized_item_type === 'RAW') {
             new_sku_type = is_buffer ? 'PTA' : 'PTO';
-        } else if (item_type === 'Traded') {
-            new_sku_type = is_buffer ? 'TRMTA' : 'TRMTO';
         }
+        
+        console.log('[SKU Type Calculation] Calculated new_sku_type:', new_sku_type);
     }
 
     // Get current value

@@ -359,19 +359,19 @@ frappe.query_reports["PO Recomendation for PSP"] = {
 				let sku_types = [];
 				if (purchase) {
 					if (buffer_flag) {
-						// Purchase + Buffer: PTA, BOTA, TRMTA
-						sku_types = ["PTA", "BOTA", "TRMTA"];
+						// Purchase + Buffer: PTA (RM with buffer)
+						sku_types = ["PTA"];
 					} else {
-						// Purchase + Non-Buffer: PTO, BOTO, TRMTO
-						sku_types = ["PTO", "BOTO", "TRMTO"];
+						// Purchase + Non-Buffer: PTO (RM without buffer)
+						sku_types = ["PTO"];
 					}
 				} else if (sell) {
 					if (buffer_flag) {
-						// Sell + Buffer: BBMTA, RBMTA
-						sku_types = ["BBMTA", "RBMTA"];
+						// Sell + Buffer: FGMTA (FG with buffer), SFGMTA (INT with buffer)
+						sku_types = ["FGMTA", "SFGMTA"];
 					} else {
-						// Sell + Non-Buffer: BBMTO, RBMTO
-						sku_types = ["BBMTO", "RBMTO"];
+						// Sell + Non-Buffer: FGMTO (FG without buffer), SFGMTO (INT without buffer)
+						sku_types = ["FGMTO", "SFGMTO"];
 					}
 				} else {
 					// No selection: return empty array

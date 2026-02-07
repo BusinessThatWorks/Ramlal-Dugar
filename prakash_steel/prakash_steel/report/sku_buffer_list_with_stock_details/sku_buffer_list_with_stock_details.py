@@ -7,22 +7,22 @@ from frappe.utils import flt, today
 
 
 def calculate_sku_type(buffer_flag, item_type):
-	"""Calculate SKU type based on buffer flag and item type"""
+	"""Calculate SKU type based on buffer flag and item type
+	Same mapping logic as calculate_sku_type in item.js
+	buffer_flag: 'Buffer' or 'Non-Buffer'
+	item_type: 'FG', 'INT', 'RM'
+	"""
 	if not item_type:
 		return None
 
 	is_buffer = buffer_flag == "Buffer"
 
-	if item_type == "BB":
-		return "BBMTA" if is_buffer else "BBMTO"
-	elif item_type == "RB":
-		return "RBMTA" if is_buffer else "RBMTO"
-	elif item_type == "BO":
-		return "BOTA" if is_buffer else "BOTO"
-	elif item_type == "RM":
+	if item_type == "FG":
+		return "FGMTA" if is_buffer else "FGMTO"
+	elif item_type == "INT":
+		return "SFGMTA" if is_buffer else "SFGMTO"
+	elif item_type == "RAW":
 		return "PTA" if is_buffer else "PTO"
-	elif item_type == "Traded":
-		return "TRMTA" if is_buffer else "TRMTO"
 
 	return None
 

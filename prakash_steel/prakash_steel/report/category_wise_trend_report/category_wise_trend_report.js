@@ -25,7 +25,7 @@ frappe.query_reports["Category wise Trend Report"] = {
 			fieldtype: "Select",
 			width: "80",
 			reqd: 1,
-			options: "BBMTA\nRBMTA\nPTA\nBOTA\nTRMTA\nPending SO\nOpen PO",
+			options: "FGMTA\nSFGMTA\nPTA\nPending SO\nOpen PO",
 		}
 	],
 

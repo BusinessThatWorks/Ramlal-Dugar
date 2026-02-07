@@ -1,6 +1,7 @@
 // Prakash Steel Planning Dashboard
+// Updated: Feb 7, 2025 - Changed to FGMTA, SFGMTA, PTA
 // Shows:
-// - On Hand Status pies for SKU types (BBMTA, RBMTA, BOTA, RMTA, PTA)
+// - On Hand Status pies for SKU types (FGMTA, SFGMTA, PTA)
 // - Pending SO Status pie (by order_status colour)
 // - Open PO Status pie (currently all BLACK)
 
@@ -78,17 +79,29 @@ function load_all_charts(page, $chartsContainer) {
 			if (skuRes && skuRes.message) {
 				const skuData = skuRes.message;
 				console.log('[PLANNING DASHBOARD] SKU Data received:', skuData);
-				const skuTypes = ['BBMTA', 'RBMTA', 'BOTA', 'RMTA', 'PTA'];
+				console.log('[PLANNING DASHBOARD] Version: Updated Feb 7, 2025 - FGMTA, SFGMTA, PTA only');
+				const skuTypes = ['FGMTA', 'SFGMTA', 'PTA'];
 
 				skuTypes.forEach((sku) => {
-					if (skuData[sku] && skuData[sku].colours && skuData[sku].colours.length) {
-						console.log(`[PLANNING DASHBOARD] Rendering ${sku} chart:`, skuData[sku]);
+					console.log(`[PLANNING DASHBOARD] Checking ${sku}:`, {
+						exists: !!skuData[sku],
+						hasColours: !!(skuData[sku] && skuData[sku].colours),
+						coloursLength: skuData[sku] && skuData[sku].colours ? skuData[sku].colours.length : 0,
+						data: skuData[sku]
+					});
+					
+					if (skuData[sku] && skuData[sku].colours && skuData[sku].colours.length > 0) {
+						console.log(`[PLANNING DASHBOARD] ✓ Rendering ${sku} chart:`, skuData[sku]);
 						console.log(`[PLANNING DASHBOARD] ${sku} - Total: ${skuData[sku].total_items}, Colours:`, skuData[sku].colours);
 						const $card = createChartCard(sku, skuData[sku], colorMap);
 						$chartsContainer.append($card);
 						renderPieChart(sku, skuData[sku], colorMap);
 					} else {
-						console.log(`[PLANNING DASHBOARD] ${sku} - No data or empty colours`);
+						console.log(`[PLANNING DASHBOARD] ✗ ${sku} - Skipping (no data or empty colours)`, {
+							hasData: !!skuData[sku],
+							hasColours: !!(skuData[sku] && skuData[sku].colours),
+							coloursLength: skuData[sku] && skuData[sku].colours ? skuData[sku].colours.length : 0
+						});
 					}
 				});
 			} else {
