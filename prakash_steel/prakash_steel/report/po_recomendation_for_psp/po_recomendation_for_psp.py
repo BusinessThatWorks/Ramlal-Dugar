@@ -1547,13 +1547,20 @@ def get_data(filters=None):
 			order_recommendation = flt(row.get("order_recommendation", 0))
 			
 			# Child WIP/Open PO Full-kit Status
+			# Logic based on production qty vs net order recommendation:
+			# - If production qty = 0 → "Pending"
+			# - If production qty is between 1 and net_order_recommendation (exclusive) → "Partial"
+			# - If production qty >= net_order_recommendation → "Full-kit"
+			production_qty_stock_wip = flt(row.get("production_qty_based_on_child_stock_wip_open_po", 0))
+			
 			if flt(net_order_recommendation) == 0:
 				row["child_wip_open_po_full_kit_status"] = None
-			elif flt(wip_open_po_shortage) == 0:
-				row["child_wip_open_po_full_kit_status"] = "Full-kit"
-			elif flt(wip_open_po_allocated) == 0:
+			elif production_qty_stock_wip == 0:
 				row["child_wip_open_po_full_kit_status"] = "Pending"
+			elif production_qty_stock_wip >= net_order_recommendation:
+				row["child_wip_open_po_full_kit_status"] = "Full-kit"
 			else:
+				# production_qty is between 1 and net_order_recommendation (exclusive)
 				row["child_wip_open_po_full_kit_status"] = "Partial"
 			
 			# Child Stock Full-kit Status
