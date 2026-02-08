@@ -1463,8 +1463,10 @@ def get_data(filters=None):
 			min_stock_allocated = 0
 		
 		# Step 2: After applying minimum stock allocation, calculate what each child CAN allocate from WIP/Open PO
-		# Then find the minimum of those CAN allocate values
-		min_wip_open_po_allocated = None
+		# Check if ALL children can be fully allocated (no shortage after stock + WIP/Open PO)
+		# If yes, allocate fully to all. If no, allocate to each child what they CAN allocate (not minimum).
+		all_children_can_be_fully_allocated = True
+		
 		for child_row in child_rows:
 			child_requirement = child_row.get("_child_requirement", 0)
 			available_wip_open_po = child_row.get("_available_wip_open_po", 0)
@@ -1475,26 +1477,30 @@ def get_data(filters=None):
 			# What can this child allocate from WIP/Open PO? (min of remaining requirement and available WIP/Open PO)
 			can_allocate_wip = min(remaining_requirement_after_min_stock, available_wip_open_po)
 			
-			# Find minimum of what each child CAN allocate
-			if min_wip_open_po_allocated is None:
-				min_wip_open_po_allocated = can_allocate_wip
-			else:
-				min_wip_open_po_allocated = min(min_wip_open_po_allocated, can_allocate_wip)
+			# Check if this child can be fully allocated (total allocation = requirement)
+			total_can_allocate = min_stock_allocated + can_allocate_wip
+			if total_can_allocate < child_requirement:
+				all_children_can_be_fully_allocated = False
 		
-		if min_wip_open_po_allocated is None:
-			min_wip_open_po_allocated = 0
-		
-		# Step 3: Apply minimum allocations to all children
+		# Step 3: Apply allocations to all children
 		for row in child_rows:
 			child_item_code = row.get("child_item_code")
 			child_requirement = row.get("_child_requirement", 0)
+			available_wip_open_po = row.get("_available_wip_open_po", 0)
 			
 			# Apply minimum stock allocation to this child
 			stock_allocated = min_stock_allocated
 			
-			# Apply minimum WIP/Open PO allocation to this child
-			# This is already calculated based on the minimum stock allocation, so it's safe to apply
-			wip_open_po_allocated = min_wip_open_po_allocated
+			# Apply WIP/Open PO allocation
+			remaining_requirement_after_stock = child_requirement - stock_allocated
+			
+			if all_children_can_be_fully_allocated:
+				# All children can be fully allocated - give each child what they can allocate (fully)
+				wip_open_po_allocated = min(remaining_requirement_after_stock, available_wip_open_po)
+			else:
+				# Not all children can be fully allocated - give each child what they CAN allocate
+				# (not the minimum - each child gets their individual maximum)
+				wip_open_po_allocated = min(remaining_requirement_after_stock, available_wip_open_po)
 			
 			# Calculate shortages
 			stock_shortage = child_requirement - stock_allocated
