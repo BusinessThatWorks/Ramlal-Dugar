@@ -1450,76 +1450,50 @@ def get_data(filters=None):
 		if not child_rows:
 			continue
 		
-		# Find minimum total allocation (stock + WIP/Open PO) across all children
-		# This represents the limiting child - we can only allocate this much to all children
-		# You can only produce as many parent items as the limiting child allows
-		min_total_allocated = None
+		# Find minimum STOCK allocation across all children
+		# Find minimum WIP/Open PO allocation across all children
+		# Apply each minimum separately to all children
+		# This ensures we only allocate what ALL children can provide
+		min_stock_allocated = None
+		min_wip_open_po_allocated = None
+		
 		for child_row in child_rows:
 			tentative_stock = child_row.get("_tentative_stock_allocated", 0)
 			tentative_wip = child_row.get("_tentative_wip_open_po_allocated", 0)
-			total_allocated = tentative_stock + tentative_wip
 			
-			if min_total_allocated is None:
-				min_total_allocated = total_allocated
+			# Find minimum stock allocation
+			if min_stock_allocated is None:
+				min_stock_allocated = tentative_stock
 			else:
-				min_total_allocated = min(min_total_allocated, total_allocated)
+				min_stock_allocated = min(min_stock_allocated, tentative_stock)
+			
+			# Find minimum WIP/Open PO allocation
+			if min_wip_open_po_allocated is None:
+				min_wip_open_po_allocated = tentative_wip
+			else:
+				min_wip_open_po_allocated = min(min_wip_open_po_allocated, tentative_wip)
 		
 		# If no valid allocation found, set to 0
-		if min_total_allocated is None:
-			min_total_allocated = 0
+		if min_stock_allocated is None:
+			min_stock_allocated = 0
+		if min_wip_open_po_allocated is None:
+			min_wip_open_po_allocated = 0
 		
-		# Apply minimum allocation to all children
-		# IMPORTANT: Maximize stock allocation first, then use WIP/Open PO to reach the minimum total
-		# The minimum represents the total (stock + WIP/Open PO) that ALL children can get
+		# Apply minimum allocations to all children
+		# Each child gets the minimum stock allocation and minimum WIP/Open PO allocation
 		for row in child_rows:
 			child_item_code = row.get("child_item_code")
 			child_requirement = row.get("_child_requirement", 0)
-			tentative_stock = row.get("_tentative_stock_allocated", 0)
-			tentative_wip = row.get("_tentative_wip_open_po_allocated", 0)
-			available_stock = row.get("_available_stock", 0)
-			available_wip_open_po = row.get("_available_wip_open_po", 0)
-			tentative_total = tentative_stock + tentative_wip
 			
-			if tentative_total > 0 and min_total_allocated > 0:
-				# If tentative total is already <= minimum, keep it as is
-				if tentative_total <= min_total_allocated:
-					stock_allocated = tentative_stock
-					wip_open_po_allocated = tentative_wip
-				else:
-					# Need to reduce to match minimum
-					# Strategy: Maximize stock allocation first, then use WIP/Open PO
-					# 1. Use as much stock as possible (up to available stock and requirement)
-					stock_allocated = min(min_total_allocated, available_stock, child_requirement)
-					
-					# 2. Fill remaining with WIP/Open PO
-					remaining_for_wip = min_total_allocated - stock_allocated
-					if remaining_for_wip > 0:
-						# Calculate remaining requirement after stock allocation
-						remaining_requirement = child_requirement - stock_allocated
-						wip_open_po_allocated = min(remaining_for_wip, remaining_requirement, available_wip_open_po)
-					else:
-						wip_open_po_allocated = 0
-					
-					# Ensure total matches minimum (handle rounding/edge cases)
-					actual_total = stock_allocated + wip_open_po_allocated
-					if actual_total < min_total_allocated:
-						# Try to add more from WIP/Open PO first, then stock
-						diff = min_total_allocated - actual_total
-						remaining_requirement = child_requirement - stock_allocated
-						if available_wip_open_po > wip_open_po_allocated and remaining_requirement > wip_open_po_allocated:
-							# Can add more WIP/Open PO
-							additional_wip = min(diff, available_wip_open_po - wip_open_po_allocated, remaining_requirement - wip_open_po_allocated)
-							wip_open_po_allocated += additional_wip
-							diff -= additional_wip
-						
-						# If still short, try to add more stock (if available)
-						if diff > 0 and available_stock > stock_allocated:
-							additional_stock = min(diff, available_stock - stock_allocated, child_requirement - stock_allocated)
-							stock_allocated += additional_stock
-			else:
-				# No tentative allocation or minimum is 0, so final is also 0
-				stock_allocated = 0
-				wip_open_po_allocated = 0
+			# Apply minimum stock allocation to this child
+			# All children get the same stock allocation (the minimum)
+			stock_allocated = min_stock_allocated
+			
+			# Apply minimum WIP/Open PO allocation to this child
+			# All children get the same WIP/Open PO allocation (the minimum)
+			# But we need to ensure it doesn't exceed the remaining requirement after stock allocation
+			remaining_requirement_after_stock = child_requirement - stock_allocated
+			wip_open_po_allocated = min(min_wip_open_po_allocated, remaining_requirement_after_stock)
 			
 			# Calculate shortages
 			stock_shortage = child_requirement - stock_allocated
