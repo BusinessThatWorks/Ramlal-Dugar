@@ -1,8 +1,3 @@
-# updated feb 7
-
-# //psp production order py jan 19 21.13
-
-
 # Copyright (c) 2025, beetashoke chakraborty and contributors
 # For license information, please see license.txt
 
@@ -598,50 +593,23 @@ def get_data(filters=None):
 
 	items_result = frappe.db.sql(items_query, as_dict=1)
 	item_codes = set(item.item_code for item in items_result)
-
-	# Filter sales order items to only selected items (buffer or non-buffer)
 	so_qty_map = {k: v for k, v in so_qty_map.items() if k in item_codes}
-
-	# Get WIP map (qty from Work Order)
 	wip_map = get_wip_map(filters)
-
-	# Get MRQ map (Material Request Quantity - sum of qty from Material Request Items)
 	mrq_map = get_mrq_map(filters)
-
-	# Get Open PO map (Purchase Order Quantity - sum of (qty - received_qty) from Purchase Order Items)
 	open_po_map = get_open_po_map()
 
-	# Get items with purchase orders (especially important for BOTA, PTA, BOTO, PTO items)
-	# These items use open_po instead of open_so, so they need to be shown even without sales orders
 	items_with_po = set(open_po_map.keys())
-	# Filter to only selected items (buffer or non-buffer) that have purchase orders
 	items_with_po_selected = {item for item in items_with_po if item in item_codes}
-
-	# Use ALL selected items (buffer or non-buffer), plus any selected items with purchase orders
-	# This ensures items with purchase orders are shown even if they don't have sales orders
 	all_items_to_process = item_codes | items_with_po_selected
 
 	if not all_items_to_process:
 		return []
-
-	# Get stock for all selected items (including those with purchase orders)
 	initial_stock_map = get_stock_map(all_items_to_process)
-
-	# Create remaining_stock map - tracks available stock after allocations
-	# Start with initial stock, will be reduced as items are allocated
 	remaining_stock = dict(initial_stock_map)
-
-	# Calculate PO recommendations with BOM traversal
-	# po_recommendations will contain ALL items (buffer and non-buffer)
 	po_recommendations = {}
-	item_groups_cache = {}  # Cache item_group to check for Raw Material
+	item_groups_cache = {}
 
-	# Initialize parent demand map (for non-buffer items)
-	# This will accumulate parent demands from all BOMs
-	parent_demand_map = {}  # item_code -> total parent demand from all BOMs
-
-	# Process each selected item that has sales orders (for BOM traversal)
-	# Sort by item_code for consistent processing order
+	parent_demand_map = {}
 	items_with_so = set(so_qty_map.keys())
 	for item_code in sorted(items_with_so):
 		so_qty = flt(so_qty_map.get(item_code, 0))
@@ -660,8 +628,6 @@ def get_data(filters=None):
 		else:
 			po_recommendations[item_code] = required_qty
 
-		# If we need to produce this item, traverse BOM
-		# Only traverse if stock is insufficient (required_qty > 0)
 		if required_qty > 0:
 			traverse_bom_for_po(
 				item_code,
@@ -672,11 +638,6 @@ def get_data(filters=None):
 				item_groups_cache,
 				level=0,
 			)
-
-	# Calculate parent demand for non-buffer items
-	# Same logic as mrp_genaration.py lines 160-457
-	# Step 1: Calculate initial order recommendations for all items
-	# First, get all item details needed for calculation
 	all_item_codes = all_items_to_process
 
 	# Get item details maps
@@ -716,7 +677,6 @@ def get_data(filters=None):
 		item_sku_type_map_all = {}
 		item_tog_map_all = {}
 
-	# Step 1: Calculate initial order recommendations for all items
 	initial_order_recommendations = {}
 	for item_code in all_item_codes:
 		order_rec = calculate_initial_order_recommendation(
@@ -731,11 +691,8 @@ def get_data(filters=None):
 			open_po_map,
 		)
 		initial_order_recommendations[item_code] = order_rec
-
-	# Step 1.5: Apply MOQ/Batch Size to initial order recommendations
 	initial_net_order_recommendations = {}
 
-	# Get MOQ and Batch Size for all items
 	if all_item_codes:
 		items_moq_batch_data = frappe.db.sql(
 			"""
@@ -765,9 +722,6 @@ def get_data(filters=None):
 		moq_map_all = {}
 		batch_size_map_all = {}
 
-	# Step 2: Traverse BOMs starting from items with net order recommendations > 0 (first traversal)
-
-	# First traversal - accumulate parent demands
 	items_to_process = [
 		(item_code, net_order_rec)
 		for item_code, net_order_rec in initial_net_order_recommendations.items()
@@ -786,11 +740,8 @@ def get_data(filters=None):
 			level=0,
 		)
 
-	# Step 3: Calculate final order recommendations for all items (with parent demands from first traversal)
 	final_order_recommendations = {}
 	for item_code in all_item_codes:
-		# Use qualified_demand_map instead of so_qty_map (all-time Open SO)
-		# The function already uses qualified_demand_map internally for non-buffer items
 		order_rec = calculate_final_order_recommendation(
 			item_code,
 			item_buffer_map_all,
@@ -798,7 +749,7 @@ def get_data(filters=None):
 			item_sku_type_map_all,
 			initial_stock_map,
 			wip_map,
-			qualified_demand_map,  # Pass qualified_demand_map as open_so_map (function uses qualified_demand for non-buffer items)
+			qualified_demand_map,
 			qualified_demand_map,
 			open_po_map,
 			mrq_map,
@@ -806,7 +757,6 @@ def get_data(filters=None):
 		)
 		final_order_recommendations[item_code] = order_rec
 
-	# Step 4: Apply MOQ/Batch Size to get net order recommendations
 	net_order_recommendations = {}
 	for item_code in all_item_codes:
 		base_order_rec = final_order_recommendations.get(item_code, 0)
@@ -814,21 +764,14 @@ def get_data(filters=None):
 		batch_size = batch_size_map_all.get(item_code, 0)
 		net_order_rec = calculate_net_order_recommendation(base_order_rec, moq, batch_size)
 		net_order_recommendations[item_code] = net_order_rec
-
-	# Step 5: Re-traverse BOMs using net_order_recommendations to update child requirements
 	parent_demand_map_net = {}
-
-	# Get items with net_order_recommendation > 0
 	items_with_net_rec = [
 		(item_code, net_rec) for item_code, net_rec in net_order_recommendations.items() if net_rec > 0
 	]
 	items_with_net_rec.sort(key=lambda x: x[0])
 
-	# Use a single shared visited_items set for the entire Step 5 traversal
 	global_visited_items = set()
 
-	# Re-traverse BOMs using net_order_recommendations
-	# Only traverse items that haven't been visited yet (to avoid duplicates)
 	for item_code, net_rec in items_with_net_rec:
 		if item_code not in global_visited_items:
 			traverse_bom_for_parent_demand(
@@ -837,7 +780,7 @@ def get_data(filters=None):
 				parent_demand_map_net,
 				global_visited_items,
 				item_groups_cache,
-				qualified_demand_map,  # Use qualified_demand_map instead of so_qty_map (all-time Open SO)
+				qualified_demand_map,
 				initial_stock_map,
 				wip_map,
 				open_po_map,
@@ -846,21 +789,13 @@ def get_data(filters=None):
 				batch_size_map_all,
 				item_buffer_map_all,
 				item_sku_type_map_all,
-				lambda item_code: None,  # Helper function - maps already populated above
+				lambda item_code: None,
 				level=0,
 			)
-
-	# Step 6: Recalculate final order recommendations with updated parent demands
-	# Then apply MOQ/Batch Size again to get final net_order_recommendations
-	# Same logic as mrp_genaration.py Step 6
 	final_order_recommendations_updated = {}
 	net_order_recommendations_final = {}
 
 	for item_code in all_item_codes:
-		# Recalculate with updated parent demands
-		# Use qualified_demand_map instead of so_qty_map (all-time Open SO)
-		# This ensures non-buffer items use qualified_demand (Open SO with delivery_date <= today)
-		# The function already uses qualified_demand_map internally for non-buffer items, so we can pass it as open_so_map
 		order_rec = calculate_final_order_recommendation(
 			item_code,
 			item_buffer_map_all,
@@ -868,27 +803,22 @@ def get_data(filters=None):
 			item_sku_type_map_all,
 			initial_stock_map,
 			wip_map,
-			qualified_demand_map,  # Pass qualified_demand_map as open_so_map (function uses qualified_demand for non-buffer items)
+			qualified_demand_map,
 			qualified_demand_map,
 			open_po_map,
 			mrq_map,
-			parent_demand_map_net,  # Use updated parent demands
+			parent_demand_map_net,
 		)
 		final_order_recommendations_updated[item_code] = order_rec
 
-		# Apply MOQ/Batch Size again
 		moq = moq_map_all.get(item_code, 0)
 		batch_size = batch_size_map_all.get(item_code, 0)
 		net_order_rec = calculate_net_order_recommendation(order_rec, moq, batch_size)
 		net_order_recommendations_final[item_code] = net_order_rec
 
-	# Use the final updated values for the report
 	final_order_recommendations = final_order_recommendations_updated
 	net_order_recommendations = net_order_recommendations_final
 	parent_demand_map = parent_demand_map_net  # Use updated parent demands
-
-	# Show ALL selected items, including those with purchase orders
-	# Items like BOTA, PTA, BOTO, PTO use open_po instead of open_so, so we need to include items with purchase orders
 	all_items_to_show = all_items_to_process
 
 	# Get item details for all items to show
@@ -900,9 +830,6 @@ def get_data(filters=None):
 		item_codes_tuple = (next(iter(all_items_to_show)),)
 	else:
 		item_codes_tuple = tuple(all_items_to_show)
-
-	# Get item details with TOG, TOY, TOR, Item Type, Batch Size, MOQ, and Item Name
-	# Include buffer or non-buffer items based on filter
 	if buffer_flag:
 		items_data = frappe.db.sql(
 			"""
@@ -950,11 +877,6 @@ def get_data(filters=None):
 
 	# Create a map for quick lookup
 	items_map = {item.item_code: item for item in items_data}
-
-	# Build final data list with all items (buffer or non-buffer based on filter)
-	# Track total stock for display (we'll fetch it once per child item)
-	# Track total WIP/Open PO for each child item (for FIFO allocation)
-	# FIFO allocation will be applied AFTER sorting, in display order
 	child_stock_map = {}
 	child_wip_open_po_map = {}
 
@@ -986,8 +908,6 @@ def get_data(filters=None):
 		# Check if item is buffer or non-buffer
 		is_item_buffer = item_buffer_flag == "Buffer"
 
-		# Calculate On Hand Status = on_hand_stock / (TOG + qualify_demand) (rounded up)
-		# Only calculate for buffer items; set to None for non-buffer items
 		on_hand_status_value = None
 		on_hand_status = None
 		on_hand_colour = None
@@ -1004,8 +924,6 @@ def get_data(filters=None):
 			if on_hand_status_value is not None:
 				numeric_status = math.ceil(on_hand_status_value)
 
-			# Derive On Hand Colour from numeric status
-			# 0% → BLACK, 1-34% → RED, 35-67% → YELLOW, 68-100% → GREEN, >100% → WHITE
 			if numeric_status is None:
 				on_hand_colour = None
 			elif numeric_status == 0:
@@ -1019,7 +937,6 @@ def get_data(filters=None):
 			else:  # > 100
 				on_hand_colour = "WHITE"
 
-			# Calculate On Hand Status (rounded up value with % sign)
 			if numeric_status is not None:
 				on_hand_status = f"{int(numeric_status)}%"
 			else:
@@ -1049,15 +966,9 @@ def get_data(filters=None):
 		# Get parent demand for this item
 		parent_demand = flt(parent_demand_map.get(item_code, 0))
 
-		# Use the calculated final order recommendations and net order recommendations from Steps 3-4
-		# These already include parent demand and use qualified_demand for non-buffer items
 		final_order_rec = flt(final_order_recommendations.get(item_code, 0))
 		net_order_rec = flt(net_order_recommendations.get(item_code, 0))
 
-		# For display in report:
-		# - order_recommendation = final_order_rec (base order recommendation after MRQ)
-		# - net_po_recommendation = final_order_rec (same, before MOQ/Batch Size)
-		# - or_with_moq_batch_size = net_order_rec (after MOQ/Batch Size)
 		order_recommendation = math.ceil(flt(final_order_rec))
 		net_po_recommendation = math.ceil(
 			flt(final_order_rec)
@@ -1087,32 +998,20 @@ def get_data(filters=None):
 				"qualify_demand": math.ceil(flt(qualify_demand)),
 			}
 		else:
-			# Non-buffer items: use same column names
-			# open_so = all-time open SO (same as buffer items' open_so)
-			# total_so = all-time open SO (same value as open_so, for display)
-			# qualify_demand = qualified demand (same as buffer items' qualify_demand)
-			# open_so_qualified = qualified demand (same value as qualify_demand, for display)
-			# requirement = parent demand (for non-buffer items, this is the parent demand from BOMs)
 			base_row = {
 				"item_code": item_code,
 				"item_name": item_name,
 				"sku_type": sku_type,
-				"requirement": math.ceil(
-					flt(parent_demand)
-				),  # Parent demand only (Open SO is in separate column)
+				"requirement": math.ceil(flt(parent_demand)),
 				"tog": None,
 				"toy": None,
 				"tor": None,
-				"open_so": math.ceil(flt(open_so)),  # All-time Open SO
-				"total_so": math.ceil(
-					flt(open_so)
-				),  # Total SO = All-time Open SO (same as buffer items' open_so)
+				"open_so": math.ceil(flt(open_so)),
+				"total_so": math.ceil(flt(open_so)),
 				"on_hand_stock": math.ceil(flt(on_hand_stock)),
 				"wip_open_po": math.ceil(flt(wip_open_po)),
-				"qualify_demand": math.ceil(flt(qualify_demand)),  # Qualified Demand
-				"open_so_qualified": math.ceil(
-					flt(qualify_demand)
-				),  # Open SO = Qualified Demand (same as buffer items' qualify_demand)
+				"qualify_demand": math.ceil(flt(qualify_demand)),
+				"open_so_qualified": math.ceil(flt(qualify_demand)),
 			}
 
 		# Add common fields
@@ -1172,15 +1071,12 @@ def get_data(filters=None):
 					f"Error getting BOM {bom} for item {item_code}: {str(e)}", "PO Recommendation Error"
 				)
 
-		# If item has child items, create a row for each child
-		# Otherwise, create one row with empty child columns
 		if child_items:
 			for child_item_info in child_items:
 				child_item_code = child_item_info["item_code"]
 				child_bom_qty = flt(child_item_info.get("bom_qty", 0))
 				child_bom_quantity = flt(child_item_info.get("bom_quantity", 1.0)) or 1.0
 
-				# Fetch child item details
 				child_item_type = None
 				child_sku_type = None
 				child_stock = 0
@@ -1189,10 +1085,8 @@ def get_data(filters=None):
 					child_item_doc = frappe.get_doc("Item", child_item_code)
 					child_item_type = child_item_doc.get("custom_item_type")
 					child_buffer_flag = child_item_doc.get("custom_buffer_flag") or "Non-Buffer"
-					# Calculate child SKU type using the existing function
 					child_sku_type = calculate_sku_type(child_buffer_flag, child_item_type)
 
-					# Get child item stock from Bin table (only fetch once per child item)
 					if child_item_code not in child_stock_map:
 						stock_data = frappe.db.sql(
 							"""
@@ -1214,12 +1108,6 @@ def get_data(filters=None):
 					frappe.log_error(
 						f"Error fetching child item {child_item_code}: {str(e)}", "PO Recommendation Error"
 					)
-
-				# Child Requirement should be based on the parent's net order recommendation
-				# multiplied by the BOM ratio (BOM Item Qty / BOM Qty), same as in mrp_genaration.py.
-				# Example from your log:
-				#   From parent B 50mm Round MS (Net Order Qty: 35500) × (BOM Item Qty: 0.87 / BOM Qty: 0.95)
-				#   = 35500 × 0.9158 = 32510.53 (parent demand for child 38mm Round C4)
 				normalized_bom_qty = child_bom_qty / child_bom_quantity if child_bom_quantity else 0
 				child_requirement = math.ceil(flt(or_with_moq_batch_size) * normalized_bom_qty)
 
@@ -1232,8 +1120,6 @@ def get_data(filters=None):
 				if child_item_code not in child_wip_open_po_map:
 					child_wip_open_po_map[child_item_code] = child_wip_open_po
 
-				# Create a copy of base_row and populate child columns
-				# Note: FIFO allocation will be calculated AFTER sorting, in display order
 				row = base_row.copy()
 				row["child_item_code"] = child_item_code
 				row["child_item_type"] = child_item_type
@@ -1241,30 +1127,21 @@ def get_data(filters=None):
 				row["child_requirement"] = child_requirement
 				row["child_stock"] = child_stock
 				row["child_wip_open_po"] = child_wip_open_po
-				# Keep BOM qty info on the row so we can translate child qty back to parent production qty
 				row["child_bom_qty"] = child_bom_qty
 				row["child_bom_quantity"] = child_bom_quantity
-				# child_stock_soft_allocation_qty and child_stock_shortage will be calculated after sorting
 				row["child_stock_soft_allocation_qty"] = None
 				row["child_stock_shortage"] = None
-				# Other child columns will be populated later
 
 				data.append(row)
 		else:
-			# No child items, add row with empty child columns
 			data.append(base_row)
 
-	# Apply SKU Type filter first (business filter - affects which items to process)
 	sku_filtered_data = []
 	for row in data:
-		# Filter by SKU Type
 		if filters.get("sku_type"):
 			sku_type_filter = filters.get("sku_type")
 			sku_type_list = []
-
-			# Handle different formats that MultiSelectList can send
 			if isinstance(sku_type_filter, str):
-				# Try to parse as JSON first (in case it's a JSON string)
 				if sku_type_filter.strip().startswith("[") or sku_type_filter.strip().startswith("{"):
 					try:
 						import json
@@ -1293,36 +1170,19 @@ def get_data(filters=None):
 
 		sku_filtered_data.append(row)
 
-	# Sort by On Hand Status in ascending order
-	# Extract numeric value from on_hand_status (e.g., "50%" -> 50)
-	# None values will be sorted last (treated as very high value)
 	def get_on_hand_status_value(row):
 		on_hand_status = row.get("on_hand_status")
 		if on_hand_status is None:
 			return float("inf")  # Put None values at the end
-		# Extract number from string like "50%"
 		try:
-			# Remove % sign and convert to float
 			numeric_value = float(on_hand_status.replace("%", "").strip())
 			return numeric_value
 		except (ValueError, AttributeError):
 			return float("inf")  # Put invalid values at the end
 
 	sku_filtered_data.sort(key=get_on_hand_status_value)
-
-	# Apply FIFO Stock Allocation and Shortage AFTER sorting (in display order)
-	# IMPORTANT: These dictionaries are GLOBAL across ALL parent items
-	# This ensures that child stock/WIP/Open PO is allocated globally using FIFO,
-	# not per parent item. If the same child item appears in multiple parent items,
-	# the first parent (by sort order) gets the allocation, and subsequent parents
-	# will see reduced/zero remaining stock.
-	# CRITICAL: FIFO must run on ALL items (after SKU filter) BEFORE applying item_code filter
-	# Otherwise, item_code filter will cause incorrect allocations by ignoring previous allocations
 	remaining_child_stock_fifo = {}
 	remaining_child_wip_open_po_fifo = {}
-
-	# Group rows by parent item_code for allocation validation
-	# We need to check if ALL children of a parent can be allocated before allocating any
 	parent_child_groups = {}
 	for row in sku_filtered_data:
 		parent_item_code = row.get("item_code")
@@ -1332,13 +1192,6 @@ def get_data(filters=None):
 				parent_child_groups[parent_item_code] = []
 			parent_child_groups[parent_item_code].append(row)
 
-	# Process allocations: For each parent, check if ALL children can be allocated
-	# If ANY child cannot be fully allocated, set ALL children allocations to 0
-	# This ensures we only allocate when we can produce the complete parent item
-	# Process parents in order to maintain FIFO
-
-	# First, process all rows to calculate tentative allocations (without updating FIFO)
-	# Store allocations temporarily
 	for row in sku_filtered_data:
 		child_item_code = row.get("child_item_code")
 		if child_item_code:
@@ -1348,7 +1201,6 @@ def get_data(filters=None):
 				if child_item_code in child_stock_map:
 					remaining_child_stock_fifo[child_item_code] = child_stock_map[child_item_code]
 				else:
-					# Fetch stock if not in map
 					try:
 						stock_data = frappe.db.sql(
 							"""
@@ -1367,25 +1219,18 @@ def get_data(filters=None):
 					except Exception:
 						remaining_child_stock_fifo[child_item_code] = 0
 
-			# Initialize remaining WIP/Open PO if not already done
 			if child_item_code not in remaining_child_wip_open_po_fifo:
-				# Get total WIP/Open PO for this child item
 				if child_item_code in child_wip_open_po_map:
-					# Use the total WIP/Open PO from the map (this is the global total for this child item)
 					remaining_child_wip_open_po_fifo[child_item_code] = flt(
 						child_wip_open_po_map[child_item_code]
 					)
 				else:
-					# If not in map, fetch it directly (this should not happen, but handle it safely)
-					# Fetch WIP and Open PO directly to ensure we get the correct total
 					child_wip = flt(wip_map.get(child_item_code, 0))
 					child_open_po = flt(open_po_map.get(child_item_code, 0))
 					total_wip_open_po = flt(child_wip) + flt(child_open_po)
-					# Store in map for future use
 					child_wip_open_po_map[child_item_code] = total_wip_open_po
 					remaining_child_wip_open_po_fifo[child_item_code] = total_wip_open_po
 
-			# Apply FIFO allocation for stock (same logic as open_so_analysis)
 			child_requirement = flt(row.get("child_requirement", 0))
 			available_stock = flt(remaining_child_stock_fifo.get(child_item_code, 0))
 			stock_allocated = min(child_requirement, available_stock)
@@ -1393,15 +1238,6 @@ def get_data(filters=None):
 
 			row["child_stock_soft_allocation_qty"] = math.ceil(stock_allocated)
 			row["child_stock_shortage"] = math.ceil(stock_shortage)
-
-			# Store tentative allocations (don't calculate production qty yet)
-			# Production qty will be calculated after minimum allocation logic is applied
-
-			# Apply FIFO allocation for WIP/Open PO against remaining requirement (after stock allocation)
-			# IMPORTANT: This uses GLOBAL remaining WIP/Open PO across ALL parent items
-			# Each parent only allocates what it NEEDS (remaining_requirement_after_stock),
-			# not all available. So if first parent needs 18324 from 35000, it gets 18324,
-			# and second parent gets the remaining 16676 (if it needs that much).
 			remaining_requirement_after_stock = stock_shortage
 			available_wip_open_po = flt(remaining_child_wip_open_po_fifo.get(child_item_code, 0))
 			wip_open_po_allocated = min(remaining_requirement_after_stock, available_wip_open_po)
@@ -1410,12 +1246,6 @@ def get_data(filters=None):
 			row["child_wip_open_po_soft_allocation_qty"] = math.ceil(wip_open_po_allocated)
 			row["child_wip_open_po_shortage"] = math.ceil(wip_open_po_shortage)
 
-			# Calculate Child WIP/Open PO Full-kit Status
-			# IMPORTANT:
-			# - If net_order_recommendation (or_with_moq_batch_size) is 0 → blank (no order to fulfill)
-			# - If child_wip_open_po_shortage = 0 → "Full-kit" (regardless of allocation)
-			# - If child_wip_open_po_shortage > 0 AND child_wip_open_po_soft_allocation_qty = 0 → "Pending"
-			# - If child_wip_open_po_shortage > 0 AND child_wip_open_po_soft_allocation_qty > 0 → "Partial"
 			net_order_recommendation = flt(row.get("or_with_moq_batch_size", 0))
 
 			if flt(net_order_recommendation) == 0:
@@ -1427,17 +1257,6 @@ def get_data(filters=None):
 			else:
 				row["child_wip_open_po_full_kit_status"] = "Partial"
 
-			# Production qty will be calculated after minimum allocation logic
-
-			# Calculate Child Stock Full-kit Status
-			# IMPORTANT:
-			# - This column is intended to reflect coverage from STOCK ONLY
-			# - WIP / Open PO coverage is shown separately in child_wip_open_po_full_kit_status
-			# Logic (stock based only):
-			#   - If order_recommendation is 0  → blank (no order to fulfill)
-			#   - If stock_shortage = 0        → "Full-kit"
-			#   - If stock_shortage > 0 and stock_allocated = 0 → "Pending"
-			#   - If stock_shortage > 0 and stock_allocated > 0 → "Partial"
 			order_recommendation = flt(row.get("order_recommendation", 0))
 
 			if flt(order_recommendation) == 0:
@@ -1449,8 +1268,6 @@ def get_data(filters=None):
 			else:
 				row["child_full_kit_status"] = "Partial"
 
-			# Store tentative allocations (don't update FIFO yet)
-			# We'll update FIFO only after validating all children of the parent can be allocated
 			row["_tentative_stock_allocated"] = stock_allocated
 			row["_tentative_wip_open_po_allocated"] = wip_open_po_allocated
 			row["_tentative_stock_shortage"] = stock_shortage
@@ -1459,10 +1276,6 @@ def get_data(filters=None):
 			row["_available_stock"] = available_stock
 			row["_available_wip_open_po"] = available_wip_open_po
 
-	# Now validate and apply allocations per parent
-	# For each parent, check if ALL children can be fully allocated
-	# If ANY child has shortage, set ALL children allocations to 0
-	# Process parents in the order they appear in sku_filtered_data to maintain FIFO
 	processed_parents = set()
 	for row in sku_filtered_data:
 		parent_item_code = row.get("item_code")
@@ -1475,8 +1288,6 @@ def get_data(filters=None):
 		child_rows = parent_child_groups[parent_item_code]
 		if not child_rows:
 			continue
-
-		# Step 1: Find minimum STOCK allocation across all children
 		min_stock_allocated = None
 		for child_row in child_rows:
 			tentative_stock = child_row.get("_tentative_stock_allocated", 0)
@@ -1487,14 +1298,6 @@ def get_data(filters=None):
 
 		if min_stock_allocated is None:
 			min_stock_allocated = 0
-
-		# Step 2: After applying minimum stock allocation, calculate what each child CAN allocate from WIP/Open PO
-		# Final rule:
-		# - If there exists at least one child that can be fully allocated from WIP/Open PO
-		#   AND its post-stock shortage is <= every other child's available WIP/Open PO
-		#   → allocate per child (each gets what it can individually).
-		# - Otherwise (all children partial or the “full” child would exceed some other child's WIP)
-		#   → use MINIMUM logic across children.
 		can_allocate_wip_list = []
 		remaining_shortage_list = []
 		available_wip_list = []
@@ -1503,23 +1306,17 @@ def get_data(filters=None):
 			child_requirement = child_row.get("_child_requirement", 0)
 			available_wip_open_po = child_row.get("_available_wip_open_po", 0)
 
-			# After minimum stock allocation, what's the remaining requirement?
 			remaining_requirement_after_min_stock = child_requirement - min_stock_allocated
-
-			# What can this child allocate from WIP/Open PO? (min of remaining requirement and available WIP/Open PO)
 			can_allocate_wip = min(remaining_requirement_after_min_stock, available_wip_open_po)
 			can_allocate_wip_list.append(can_allocate_wip)
 			remaining_shortage_list.append(remaining_requirement_after_min_stock)
 			available_wip_list.append(available_wip_open_po)
 
-		# Determine if there exists a "safe fully-allocatable" child
 		any_child_can_be_fully_allocated = False
-		for idx, (rem_shortage, can_alloc, avail_wip) in enumerate(
-			zip(remaining_shortage_list, can_allocate_wip_list, available_wip_list)
+		for idx, (rem_shortage, can_alloc, _avail_wip) in enumerate(
+			zip(remaining_shortage_list, can_allocate_wip_list, available_wip_list, strict=False)
 		):
-			# This child is fully allocatable from WIP if it can cover its entire remaining shortage
 			if can_alloc >= rem_shortage and rem_shortage > 0:
-				# Check if this shortage is <= every other child's available WIP/Open PO
 				is_safe_full = True
 				for j, other_avail in enumerate(available_wip_list):
 					if j == idx:
@@ -1532,64 +1329,45 @@ def get_data(filters=None):
 					any_child_can_be_fully_allocated = True
 					break
 
-		# Calculate minimum WIP/Open PO allocation (used when we CANNOT safely fully-allocate any child)
 		min_wip_open_po_allocated = None
 		if not any_child_can_be_fully_allocated:
 			min_wip_open_po_allocated = min(can_allocate_wip_list) if can_allocate_wip_list else 0
 
-		# Step 3: Apply allocations to all children
 		for row in child_rows:
 			child_item_code = row.get("child_item_code")
 			child_requirement = row.get("_child_requirement", 0)
 			available_wip_open_po = row.get("_available_wip_open_po", 0)
 
-			# Apply minimum stock allocation to this child
 			stock_allocated = min_stock_allocated
-
-			# Apply WIP/Open PO allocation
 			remaining_requirement_after_stock = child_requirement - stock_allocated
 
 			if any_child_can_be_fully_allocated:
-				# At least ONE child can be fully allocated:
-				# → allocate per child: each gets what it can (up to remaining requirement and available WIP/Open PO)
 				wip_open_po_allocated = min(remaining_requirement_after_stock, available_wip_open_po)
 			else:
-				# NO child can be fully allocated (ALL partial):
-				# → use MINIMUM logic so that all children get the same allocation (limited by the weakest child)
 				wip_open_po_allocated = min_wip_open_po_allocated
 
-			# Calculate shortages
 			stock_shortage = child_requirement - stock_allocated
 			remaining_requirement_after_stock = stock_shortage
 			wip_open_po_shortage = remaining_requirement_after_stock - wip_open_po_allocated
-
-			# Update FIFO dictionaries only with the actual allocated amounts
 			available_stock = row.get("_available_stock", 0)
 			available_wip_open_po = row.get("_available_wip_open_po", 0)
 			remaining_child_stock_fifo[child_item_code] = available_stock - stock_allocated
 			remaining_child_wip_open_po_fifo[child_item_code] = available_wip_open_po - wip_open_po_allocated
-
-			# Update row with final allocations
 			row["child_stock_soft_allocation_qty"] = math.ceil(stock_allocated)
 			row["child_stock_shortage"] = math.ceil(stock_shortage)
 			row["child_wip_open_po_soft_allocation_qty"] = math.ceil(wip_open_po_allocated)
 			row["child_wip_open_po_shortage"] = math.ceil(wip_open_po_shortage)
-
-			# Store traditional (tentative) allocations for comparison
 			tentative_stock = row.get("_tentative_stock_allocated", 0)
 			tentative_wip = row.get("_tentative_wip_open_po_allocated", 0)
 			row["child_traditional_stock_allocation"] = math.ceil(tentative_stock)
 			row["child_traditional_wip_open_po_soft_allocation"] = math.ceil(tentative_wip)
 
-			# Recalculate production quantities with final allocations
-			# Use the final stock_allocated and wip_open_po_allocated values from minimum allocation logic
 			child_bom_qty = flt(row.get("child_bom_qty", 0))
 			child_bom_quantity = flt(row.get("child_bom_quantity", 1.0)) or 1.0
 
 			if child_bom_qty > 0:
 				parent_per_child_factor = child_bom_quantity / child_bom_qty
 			else:
-				# Invalid BOM data - log error
 				frappe.log_error(
 					f"Missing BOM data for child {child_item_code} in parent {parent_item_code}. "
 					f"Cannot calculate production qty.",
@@ -1597,11 +1375,9 @@ def get_data(filters=None):
 				)
 				parent_per_child_factor = 0
 
-			# Production qty based on child stock only
 			production_qty_based_on_child_stock = math.ceil(flt(stock_allocated) * parent_per_child_factor)
 			row["production_qty_based_on_child_stock"] = production_qty_based_on_child_stock
 
-			# Production qty based on child stock + WIP/Open PO
 			total_allocated = flt(stock_allocated) + flt(wip_open_po_allocated)
 			production_qty_based_on_child_stock_wip_open_po = math.ceil(
 				total_allocated * parent_per_child_factor
@@ -1610,15 +1386,8 @@ def get_data(filters=None):
 				production_qty_based_on_child_stock_wip_open_po
 			)
 
-			# Update full-kit status based on final allocations
 			net_order_recommendation = flt(row.get("or_with_moq_batch_size", 0))
 			order_recommendation = flt(row.get("order_recommendation", 0))
-
-			# Child WIP/Open PO Full-kit Status
-			# Logic based on production qty vs net order recommendation:
-			# - If production qty = 0 → "Pending"
-			# - If production qty is between 1 and net_order_recommendation (exclusive) → "Partial"
-			# - If production qty >= net_order_recommendation → "Full-kit"
 			production_qty_stock_wip = flt(row.get("production_qty_based_on_child_stock_wip_open_po", 0))
 
 			if flt(net_order_recommendation) == 0:
@@ -1628,7 +1397,6 @@ def get_data(filters=None):
 			elif production_qty_stock_wip >= net_order_recommendation:
 				row["child_wip_open_po_full_kit_status"] = "Full-kit"
 			else:
-				# production_qty is between 1 and net_order_recommendation (exclusive)
 				row["child_wip_open_po_full_kit_status"] = "Partial"
 
 			# Child Stock Full-kit Status
@@ -1641,16 +1409,8 @@ def get_data(filters=None):
 			else:
 				row["child_full_kit_status"] = "Partial"
 
-	# Production quantities are already calculated correctly in the minimum allocation logic above
-	# No need to recalculate or overwrite them here
-	# The minimum allocation logic ensures all children get the same total allocation,
-	# and production qty is calculated from those allocations
-
-	# Apply item_code filter AFTER FIFO allocation (for display only)
-	# This ensures FIFO allocation is correct even when filtering by item_code
 	filtered_data = []
 	for row in sku_filtered_data:
-		# Filter by Item Code (exact match) - only for display
 		if filters.get("item_code"):
 			if row.get("item_code") != filters.get("item_code"):
 				continue
