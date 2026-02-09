@@ -476,11 +476,23 @@ def get_columns(filters=None):
 					"width": 120,
 				},
 				{
-					"label": _("Child Stock soft Allocation qty"),
+					"label": _("Child stock soft allocation qty"),
+					"fieldname": "child_traditional_stock_allocation",
+					"fieldtype": "Int",
+					"width": 220,
+				},
+				{
+					"label": _("Child minimum Stock soft Allocation qty"),
 					"fieldname": "child_stock_soft_allocation_qty",
 					"fieldtype": "Int",
 					"width": 200,
 				},
+				# {
+				# 	"label": _("Child traditional stock allocation"),
+				# 	"fieldname": "child_traditional_stock_allocation",
+				# 	"fieldtype": "Int",
+				# 	"width": 220,
+				# },
 				{
 					"label": _("Child Stock shortage"),
 					"fieldname": "child_stock_shortage",
@@ -494,11 +506,23 @@ def get_columns(filters=None):
 					"width": 150,
 				},
 				{
-					"label": _("Child WIP/Open PO soft allocation qty"),
+					"label": _("Child wip/open po soft allocation qty"),
+					"fieldname": "child_traditional_wip_open_po_soft_allocation",
+					"fieldtype": "Int",
+					"width": 280,
+				},
+				{
+					"label": _("Child minimum WIP/Open PO soft allocation qty"),
 					"fieldname": "child_wip_open_po_soft_allocation_qty",
 					"fieldtype": "Int",
 					"width": 250,
 				},
+				# {
+				# 	"label": _("Child traditional wip/open po soft allocation"),
+				# 	"fieldname": "child_traditional_wip_open_po_soft_allocation",
+				# 	"fieldtype": "Int",
+				# 	"width": 280,
+				# },
 				{
 					"label": _("Child WIP/Open PO Shortage"),
 					"fieldname": "child_wip_open_po_shortage",
@@ -1112,10 +1136,12 @@ def get_data(filters=None):
 				"child_requirement": None,
 				"child_stock": None,
 				"child_stock_soft_allocation_qty": None,
+				"child_traditional_stock_allocation": None,
 				"child_stock_shortage": None,
 				"child_full_kit_status": None,
 				"child_wip_open_po": None,
 				"child_wip_open_po_soft_allocation_qty": None,
+				"child_traditional_wip_open_po_soft_allocation": None,
 				"child_wip_open_po_shortage": None,
 				"child_wip_open_po_full_kit_status": None,
 			}
@@ -1310,7 +1336,7 @@ def get_data(filters=None):
 	# If ANY child cannot be fully allocated, set ALL children allocations to 0
 	# This ensures we only allocate when we can produce the complete parent item
 	# Process parents in order to maintain FIFO
-	
+
 	# First, process all rows to calculate tentative allocations (without updating FIFO)
 	# Store allocations temporarily
 	for row in sku_filtered_data:
@@ -1444,12 +1470,12 @@ def get_data(filters=None):
 			continue
 		if parent_item_code not in parent_child_groups:
 			continue
-		
+
 		processed_parents.add(parent_item_code)
 		child_rows = parent_child_groups[parent_item_code]
 		if not child_rows:
 			continue
-		
+
 		# Step 1: Find minimum STOCK allocation across all children
 		min_stock_allocated = None
 		for child_row in child_rows:
@@ -1458,72 +1484,74 @@ def get_data(filters=None):
 				min_stock_allocated = tentative_stock
 			else:
 				min_stock_allocated = min(min_stock_allocated, tentative_stock)
-		
+
 		if min_stock_allocated is None:
 			min_stock_allocated = 0
-		
+
 		# Step 2: After applying minimum stock allocation, calculate what each child CAN allocate from WIP/Open PO
-		# Check if ALL children can be fully allocated (no shortage after stock + WIP/Open PO)
-		# If yes, allocate fully to all. If no, allocate to each child what they CAN allocate (not minimum).
-		all_children_can_be_fully_allocated = True
-		
+		# Find the MINIMUM of what each child can allocate, and apply that minimum to ALL children
+		# This ensures we only allocate what ALL children can provide
+		min_wip_open_po_allocated = None
+
 		for child_row in child_rows:
 			child_requirement = child_row.get("_child_requirement", 0)
 			available_wip_open_po = child_row.get("_available_wip_open_po", 0)
-			
+
 			# After minimum stock allocation, what's the remaining requirement?
 			remaining_requirement_after_min_stock = child_requirement - min_stock_allocated
-			
+
 			# What can this child allocate from WIP/Open PO? (min of remaining requirement and available WIP/Open PO)
 			can_allocate_wip = min(remaining_requirement_after_min_stock, available_wip_open_po)
-			
-			# Check if this child can be fully allocated (total allocation = requirement)
-			total_can_allocate = min_stock_allocated + can_allocate_wip
-			if total_can_allocate < child_requirement:
-				all_children_can_be_fully_allocated = False
-		
+
+			# Find minimum of what each child CAN allocate
+			if min_wip_open_po_allocated is None:
+				min_wip_open_po_allocated = can_allocate_wip
+			else:
+				min_wip_open_po_allocated = min(min_wip_open_po_allocated, can_allocate_wip)
+
+		if min_wip_open_po_allocated is None:
+			min_wip_open_po_allocated = 0
+
 		# Step 3: Apply allocations to all children
 		for row in child_rows:
 			child_item_code = row.get("child_item_code")
 			child_requirement = row.get("_child_requirement", 0)
-			available_wip_open_po = row.get("_available_wip_open_po", 0)
-			
+
 			# Apply minimum stock allocation to this child
 			stock_allocated = min_stock_allocated
-			
-			# Apply WIP/Open PO allocation
-			remaining_requirement_after_stock = child_requirement - stock_allocated
-			
-			if all_children_can_be_fully_allocated:
-				# All children can be fully allocated - give each child what they can allocate (fully)
-				wip_open_po_allocated = min(remaining_requirement_after_stock, available_wip_open_po)
-			else:
-				# Not all children can be fully allocated - give each child what they CAN allocate
-				# (not the minimum - each child gets their individual maximum)
-				wip_open_po_allocated = min(remaining_requirement_after_stock, available_wip_open_po)
-			
+
+			# Apply minimum WIP/Open PO allocation to this child
+			# All children get the same minimum WIP/Open PO allocation
+			wip_open_po_allocated = min_wip_open_po_allocated
+
 			# Calculate shortages
 			stock_shortage = child_requirement - stock_allocated
 			remaining_requirement_after_stock = stock_shortage
 			wip_open_po_shortage = remaining_requirement_after_stock - wip_open_po_allocated
-			
+
 			# Update FIFO dictionaries only with the actual allocated amounts
 			available_stock = row.get("_available_stock", 0)
 			available_wip_open_po = row.get("_available_wip_open_po", 0)
 			remaining_child_stock_fifo[child_item_code] = available_stock - stock_allocated
 			remaining_child_wip_open_po_fifo[child_item_code] = available_wip_open_po - wip_open_po_allocated
-			
+
 			# Update row with final allocations
 			row["child_stock_soft_allocation_qty"] = math.ceil(stock_allocated)
 			row["child_stock_shortage"] = math.ceil(stock_shortage)
 			row["child_wip_open_po_soft_allocation_qty"] = math.ceil(wip_open_po_allocated)
 			row["child_wip_open_po_shortage"] = math.ceil(wip_open_po_shortage)
-			
+
+			# Store traditional (tentative) allocations for comparison
+			tentative_stock = row.get("_tentative_stock_allocated", 0)
+			tentative_wip = row.get("_tentative_wip_open_po_allocated", 0)
+			row["child_traditional_stock_allocation"] = math.ceil(tentative_stock)
+			row["child_traditional_wip_open_po_soft_allocation"] = math.ceil(tentative_wip)
+
 			# Recalculate production quantities with final allocations
 			# Use the final stock_allocated and wip_open_po_allocated values from minimum allocation logic
 			child_bom_qty = flt(row.get("child_bom_qty", 0))
 			child_bom_quantity = flt(row.get("child_bom_quantity", 1.0)) or 1.0
-			
+
 			if child_bom_qty > 0:
 				parent_per_child_factor = child_bom_quantity / child_bom_qty
 			else:
@@ -1531,14 +1559,14 @@ def get_data(filters=None):
 				frappe.log_error(
 					f"Missing BOM data for child {child_item_code} in parent {parent_item_code}. "
 					f"Cannot calculate production qty.",
-					"PO Recommendation - Missing BOM Data"
+					"PO Recommendation - Missing BOM Data",
 				)
 				parent_per_child_factor = 0
-			
+
 			# Production qty based on child stock only
 			production_qty_based_on_child_stock = math.ceil(flt(stock_allocated) * parent_per_child_factor)
 			row["production_qty_based_on_child_stock"] = production_qty_based_on_child_stock
-			
+
 			# Production qty based on child stock + WIP/Open PO
 			total_allocated = flt(stock_allocated) + flt(wip_open_po_allocated)
 			production_qty_based_on_child_stock_wip_open_po = math.ceil(
@@ -1547,18 +1575,18 @@ def get_data(filters=None):
 			row["production_qty_based_on_child_stock_wip_open_po"] = (
 				production_qty_based_on_child_stock_wip_open_po
 			)
-			
+
 			# Update full-kit status based on final allocations
 			net_order_recommendation = flt(row.get("or_with_moq_batch_size", 0))
 			order_recommendation = flt(row.get("order_recommendation", 0))
-			
+
 			# Child WIP/Open PO Full-kit Status
 			# Logic based on production qty vs net order recommendation:
 			# - If production qty = 0 → "Pending"
 			# - If production qty is between 1 and net_order_recommendation (exclusive) → "Partial"
 			# - If production qty >= net_order_recommendation → "Full-kit"
 			production_qty_stock_wip = flt(row.get("production_qty_based_on_child_stock_wip_open_po", 0))
-			
+
 			if flt(net_order_recommendation) == 0:
 				row["child_wip_open_po_full_kit_status"] = None
 			elif production_qty_stock_wip == 0:
@@ -1568,7 +1596,7 @@ def get_data(filters=None):
 			else:
 				# production_qty is between 1 and net_order_recommendation (exclusive)
 				row["child_wip_open_po_full_kit_status"] = "Partial"
-			
+
 			# Child Stock Full-kit Status
 			if flt(order_recommendation) == 0:
 				row["child_full_kit_status"] = None
