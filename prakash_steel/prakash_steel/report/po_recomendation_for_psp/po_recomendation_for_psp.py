@@ -243,6 +243,12 @@ def get_columns(filters=None):
 			"fieldtype": "Data",
 			"width": 100,
 		},
+		{
+			"label": _("Sequence"),
+			"fieldname": "sequence",
+			"fieldtype": "Data",
+			"width": 80,
+		},
 	]
 
 	# Add "Requirement" column for non-buffer items (after SKU Type)
@@ -1348,6 +1354,16 @@ def get_data(filters=None):
 			if row.get("item_code") != filters.get("item_code"):
 				continue
 		filtered_data.append(row)
+
+	parent_sequence_counts = {}
+	for row in filtered_data:
+		parent_item_code = row.get("item_code")
+		if not parent_item_code:
+			row["sequence"] = None
+			continue
+		current = parent_sequence_counts.get(parent_item_code, 0) + 1
+		parent_sequence_counts[parent_item_code] = current
+		row["sequence"] = f"{current:03d}"
 
 	return filtered_data
 
