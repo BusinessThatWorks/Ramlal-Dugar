@@ -416,13 +416,13 @@ def get_columns(filters=None):
 		columns.extend(
 			[
 				{
-					"label": _("Production qty based on child stock"),
+					"label": _("Production qty based on child stock Ind"),
 					"fieldname": "production_qty_based_on_child_stock",
 					"fieldtype": "Int",
 					"width": 220,
 				},
 				{
-					"label": _("Production qty based on child stock Ind"),
+					"label": _("Production qty based on child stock"),
 					"fieldname": "minimum_qty_based_on_child_stock",
 					"fieldtype": "Int",
 					"width": 220,
@@ -434,13 +434,13 @@ def get_columns(filters=None):
 					"width": 160,
 				},
 				{
-					"label": _("Production qty based on child stock+WIP/Open PO"),
+					"label": _("Production qty based on child stock+WIP/Open PO Ind"),
 					"fieldname": "production_qty_based_on_child_stock_wip_open_po",
 					"fieldtype": "Int",
 					"width": 280,
 				},
 				{
-					"label": _("Production qty based on child stock+wip/open po Ind "),
+					"label": _("Production qty based on child stock+wip/open po"),
 					"fieldname": "minimum_qty_based_on_child_stock_wip_open_po",
 					"fieldtype": "Int",
 					"width": 280,
