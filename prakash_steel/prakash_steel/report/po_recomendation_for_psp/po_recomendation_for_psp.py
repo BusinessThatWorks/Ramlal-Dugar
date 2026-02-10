@@ -422,6 +422,12 @@ def get_columns(filters=None):
 					"width": 220,
 				},
 				{
+					"label": _("Production qty based on child stock Ind"),
+					"fieldname": "minimum_qty_based_on_child_stock",
+					"fieldtype": "Int",
+					"width": 220,
+				},
+				{
 					"label": _("Child Stock Full-Kit Status"),
 					"fieldname": "child_full_kit_status",
 					"fieldtype": "Data",
@@ -430,6 +436,12 @@ def get_columns(filters=None):
 				{
 					"label": _("Production qty based on child stock+WIP/Open PO"),
 					"fieldname": "production_qty_based_on_child_stock_wip_open_po",
+					"fieldtype": "Int",
+					"width": 280,
+				},
+				{
+					"label": _("Production qty based on child stock+wip/open po Ind "),
+					"fieldname": "minimum_qty_based_on_child_stock_wip_open_po",
 					"fieldtype": "Int",
 					"width": 280,
 				},
@@ -475,9 +487,10 @@ def get_columns(filters=None):
 					"fieldname": "child_traditional_stock_allocation",
 					"fieldtype": "Int",
 					"width": 220,
+					"hidden": 1,
 				},
 				{
-					"label": _("Child minimum Stock soft Allocation qty"),
+					"label": _("Child Stock soft Allocation qty"),
 					"fieldname": "child_stock_soft_allocation_qty",
 					"fieldtype": "Int",
 					"width": 200,
@@ -505,9 +518,10 @@ def get_columns(filters=None):
 					"fieldname": "child_traditional_wip_open_po_soft_allocation",
 					"fieldtype": "Int",
 					"width": 280,
+					"hidden": 1,
 				},
 				{
-					"label": _("Child minimum WIP/Open PO soft allocation qty"),
+					"label": _("Child WIP/Open PO soft allocation qty"),
 					"fieldname": "child_wip_open_po_soft_allocation_qty",
 					"fieldtype": "Int",
 					"width": 250,
@@ -1183,21 +1197,11 @@ def get_data(filters=None):
 	sku_filtered_data.sort(key=get_on_hand_status_value)
 	remaining_child_stock_fifo = {}
 	remaining_child_wip_open_po_fifo = {}
-	parent_child_groups = {}
-	for row in sku_filtered_data:
-		parent_item_code = row.get("item_code")
-		child_item_code = row.get("child_item_code")
-		if parent_item_code and child_item_code:
-			if parent_item_code not in parent_child_groups:
-				parent_child_groups[parent_item_code] = []
-			parent_child_groups[parent_item_code].append(row)
 
 	for row in sku_filtered_data:
 		child_item_code = row.get("child_item_code")
 		if child_item_code:
-			# Initialize remaining stock if not already done
 			if child_item_code not in remaining_child_stock_fifo:
-				# Get total stock for this child item
 				if child_item_code in child_stock_map:
 					remaining_child_stock_fifo[child_item_code] = child_stock_map[child_item_code]
 				else:
@@ -1236,131 +1240,19 @@ def get_data(filters=None):
 			stock_allocated = min(child_requirement, available_stock)
 			stock_shortage = child_requirement - stock_allocated
 
-			row["child_stock_soft_allocation_qty"] = math.ceil(stock_allocated)
-			row["child_stock_shortage"] = math.ceil(stock_shortage)
+			remaining_child_stock_fifo[child_item_code] = available_stock - stock_allocated
+
 			remaining_requirement_after_stock = stock_shortage
 			available_wip_open_po = flt(remaining_child_wip_open_po_fifo.get(child_item_code, 0))
 			wip_open_po_allocated = min(remaining_requirement_after_stock, available_wip_open_po)
 			wip_open_po_shortage = remaining_requirement_after_stock - wip_open_po_allocated
 
-			row["child_wip_open_po_soft_allocation_qty"] = math.ceil(wip_open_po_allocated)
-			row["child_wip_open_po_shortage"] = math.ceil(wip_open_po_shortage)
-
-			net_order_recommendation = flt(row.get("or_with_moq_batch_size", 0))
-
-			if flt(net_order_recommendation) == 0:
-				row["child_wip_open_po_full_kit_status"] = None
-			elif flt(wip_open_po_shortage) == 0:
-				row["child_wip_open_po_full_kit_status"] = "Full-kit"
-			elif flt(wip_open_po_allocated) == 0:
-				row["child_wip_open_po_full_kit_status"] = "Pending"
-			else:
-				row["child_wip_open_po_full_kit_status"] = "Partial"
-
-			order_recommendation = flt(row.get("order_recommendation", 0))
-
-			if flt(order_recommendation) == 0:
-				row["child_full_kit_status"] = None
-			elif flt(stock_shortage) == 0:
-				row["child_full_kit_status"] = "Full-kit"
-			elif flt(stock_allocated) == 0:
-				row["child_full_kit_status"] = "Pending"
-			else:
-				row["child_full_kit_status"] = "Partial"
-
-			row["_tentative_stock_allocated"] = stock_allocated
-			row["_tentative_wip_open_po_allocated"] = wip_open_po_allocated
-			row["_tentative_stock_shortage"] = stock_shortage
-			row["_tentative_wip_open_po_shortage"] = wip_open_po_shortage
-			row["_child_requirement"] = child_requirement
-			row["_available_stock"] = available_stock
-			row["_available_wip_open_po"] = available_wip_open_po
-
-	processed_parents = set()
-	for row in sku_filtered_data:
-		parent_item_code = row.get("item_code")
-		if not parent_item_code or parent_item_code in processed_parents:
-			continue
-		if parent_item_code not in parent_child_groups:
-			continue
-
-		processed_parents.add(parent_item_code)
-		child_rows = parent_child_groups[parent_item_code]
-		if not child_rows:
-			continue
-		min_stock_allocated = None
-		for child_row in child_rows:
-			tentative_stock = child_row.get("_tentative_stock_allocated", 0)
-			if min_stock_allocated is None:
-				min_stock_allocated = tentative_stock
-			else:
-				min_stock_allocated = min(min_stock_allocated, tentative_stock)
-
-		if min_stock_allocated is None:
-			min_stock_allocated = 0
-		can_allocate_wip_list = []
-		remaining_shortage_list = []
-		available_wip_list = []
-
-		for child_row in child_rows:
-			child_requirement = child_row.get("_child_requirement", 0)
-			available_wip_open_po = child_row.get("_available_wip_open_po", 0)
-
-			remaining_requirement_after_min_stock = child_requirement - min_stock_allocated
-			can_allocate_wip = min(remaining_requirement_after_min_stock, available_wip_open_po)
-			can_allocate_wip_list.append(can_allocate_wip)
-			remaining_shortage_list.append(remaining_requirement_after_min_stock)
-			available_wip_list.append(available_wip_open_po)
-
-		any_child_can_be_fully_allocated = False
-		for idx, (rem_shortage, can_alloc, _avail_wip) in enumerate(
-			zip(remaining_shortage_list, can_allocate_wip_list, available_wip_list, strict=False)
-		):
-			if can_alloc >= rem_shortage and rem_shortage > 0:
-				is_safe_full = True
-				for j, other_avail in enumerate(available_wip_list):
-					if j == idx:
-						continue
-					if rem_shortage > other_avail:
-						is_safe_full = False
-						break
-
-				if is_safe_full:
-					any_child_can_be_fully_allocated = True
-					break
-
-		min_wip_open_po_allocated = None
-		if not any_child_can_be_fully_allocated:
-			min_wip_open_po_allocated = min(can_allocate_wip_list) if can_allocate_wip_list else 0
-
-		for row in child_rows:
-			child_item_code = row.get("child_item_code")
-			child_requirement = row.get("_child_requirement", 0)
-			available_wip_open_po = row.get("_available_wip_open_po", 0)
-
-			stock_allocated = min_stock_allocated
-			remaining_requirement_after_stock = child_requirement - stock_allocated
-
-			if any_child_can_be_fully_allocated:
-				wip_open_po_allocated = min(remaining_requirement_after_stock, available_wip_open_po)
-			else:
-				wip_open_po_allocated = min_wip_open_po_allocated
-
-			stock_shortage = child_requirement - stock_allocated
-			remaining_requirement_after_stock = stock_shortage
-			wip_open_po_shortage = remaining_requirement_after_stock - wip_open_po_allocated
-			available_stock = row.get("_available_stock", 0)
-			available_wip_open_po = row.get("_available_wip_open_po", 0)
-			remaining_child_stock_fifo[child_item_code] = available_stock - stock_allocated
 			remaining_child_wip_open_po_fifo[child_item_code] = available_wip_open_po - wip_open_po_allocated
+
 			row["child_stock_soft_allocation_qty"] = math.ceil(stock_allocated)
 			row["child_stock_shortage"] = math.ceil(stock_shortage)
 			row["child_wip_open_po_soft_allocation_qty"] = math.ceil(wip_open_po_allocated)
 			row["child_wip_open_po_shortage"] = math.ceil(wip_open_po_shortage)
-			tentative_stock = row.get("_tentative_stock_allocated", 0)
-			tentative_wip = row.get("_tentative_wip_open_po_allocated", 0)
-			row["child_traditional_stock_allocation"] = math.ceil(tentative_stock)
-			row["child_traditional_wip_open_po_soft_allocation"] = math.ceil(tentative_wip)
 
 			child_bom_qty = flt(row.get("child_bom_qty", 0))
 			child_bom_quantity = flt(row.get("child_bom_quantity", 1.0)) or 1.0
@@ -1369,7 +1261,7 @@ def get_data(filters=None):
 				parent_per_child_factor = child_bom_quantity / child_bom_qty
 			else:
 				frappe.log_error(
-					f"Missing BOM data for child {child_item_code} in parent {parent_item_code}. "
+					f"Missing BOM data for child {child_item_code} in parent {row.get('item_code')}. "
 					f"Cannot calculate production qty.",
 					"PO Recommendation - Missing BOM Data",
 				)
@@ -1399,7 +1291,6 @@ def get_data(filters=None):
 			else:
 				row["child_wip_open_po_full_kit_status"] = "Partial"
 
-			# Child Stock Full-kit Status
 			if flt(order_recommendation) == 0:
 				row["child_full_kit_status"] = None
 			elif flt(stock_shortage) == 0:
@@ -1408,6 +1299,48 @@ def get_data(filters=None):
 				row["child_full_kit_status"] = "Pending"
 			else:
 				row["child_full_kit_status"] = "Partial"
+
+	parent_minimums = {}
+	for row in sku_filtered_data:
+		parent_item_code = row.get("item_code")
+		child_item_code = row.get("child_item_code")
+		if parent_item_code and child_item_code:
+			if parent_item_code not in parent_minimums:
+				parent_minimums[parent_item_code] = {
+					"min_stock": None,
+					"min_stock_wip": None,
+				}
+
+			production_qty_stock = flt(row.get("production_qty_based_on_child_stock", 0))
+			production_qty_stock_wip = flt(row.get("production_qty_based_on_child_stock_wip_open_po", 0))
+
+			if parent_minimums[parent_item_code]["min_stock"] is None:
+				parent_minimums[parent_item_code]["min_stock"] = production_qty_stock
+			else:
+				parent_minimums[parent_item_code]["min_stock"] = min(
+					parent_minimums[parent_item_code]["min_stock"], production_qty_stock
+				)
+
+			if parent_minimums[parent_item_code]["min_stock_wip"] is None:
+				parent_minimums[parent_item_code]["min_stock_wip"] = production_qty_stock_wip
+			else:
+				parent_minimums[parent_item_code]["min_stock_wip"] = min(
+					parent_minimums[parent_item_code]["min_stock_wip"], production_qty_stock_wip
+				)
+
+	for row in sku_filtered_data:
+		parent_item_code = row.get("item_code")
+		child_item_code = row.get("child_item_code")
+		if parent_item_code and child_item_code and parent_item_code in parent_minimums:
+			row["minimum_qty_based_on_child_stock"] = math.ceil(
+				parent_minimums[parent_item_code]["min_stock"] or 0
+			)
+			row["minimum_qty_based_on_child_stock_wip_open_po"] = math.ceil(
+				parent_minimums[parent_item_code]["min_stock_wip"] or 0
+			)
+		else:
+			row["minimum_qty_based_on_child_stock"] = None
+			row["minimum_qty_based_on_child_stock_wip_open_po"] = None
 
 	filtered_data = []
 	for row in sku_filtered_data:
