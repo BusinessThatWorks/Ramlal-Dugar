@@ -13,11 +13,6 @@ class MRPGenaration(Document):
 
 
 def calculate_sku_type(buffer_flag, item_type):
-	"""Calculate SKU type based on buffer flag and item type
-	Same mapping logic as calculate_sku_type in item.js
-	buffer_flag: 'Buffer' or 'Non-Buffer'
-	item_type: 'FG', 'INT', 'RM'
-	"""
 	if not item_type:
 		return None
 
@@ -35,15 +30,6 @@ def calculate_sku_type(buffer_flag, item_type):
 
 @frappe.whitelist()
 def generate_mrp_order_recommendations():
-	"""
-	Enqueue MRP order recommendations calculation as a background job.
-	Returns job_id for status polling.
-
-	The job will be visible in:
-	- RQ Job list (search "RQ Job" in Frappe)
-	- System Health Report
-	- Worker logs
-	"""
 	# Enqueue the worker function as a background job
 	job = frappe.enqueue(
 		"prakash_steel.prakash_steel.doctype.mrp_genaration.mrp_genaration._generate_mrp_order_recommendations_worker",
@@ -71,18 +57,6 @@ def generate_mrp_order_recommendations():
 
 
 def _generate_mrp_order_recommendations_worker():
-	"""
-	Worker function that performs the actual MRP calculation.
-	This runs as a background job to prevent UI blocking.
-
-	Logic:
-	- Buffer items: Order recommendation = TOG - Stock - WIP (parent demand ignored)
-	- Non-buffer items: Order recommendation = max(0, Requirement - Stock - WIP)
-	  where Requirement = Open SO + sum of all parent BOM demands
-	- When traversing BOM:
-	  - For buffer child items: Don't add parent demand, only use TOG-based calculation
-	  - For non-buffer child items: Add parent demand to requirement
-	"""
 	# Log job start
 	job_id = None
 	try:
@@ -134,38 +108,17 @@ def _generate_mrp_order_recommendations_worker():
 		item_moq_map[item_code] = flt(item.moq or 0)
 		item_batch_size_map[item_code] = flt(item.batch_size or 0)
 
-	# Get stock map for all items
 	all_item_codes = set(item_buffer_map.keys())
 	stock_map = get_stock_map_for_mrp(all_item_codes)
-
-	# Get WIP map for all items
 	wip_map = get_wip_map_for_mrp()
-
-	# Get Open SO map for all items (for non-buffer items)
 	open_so_map = get_open_so_map_for_mrp()
-
-	# Get Qualified Demand map (Open SO with delivery_date <= today) - for buffer items
 	qualified_demand_map = get_qualified_demand_map_for_mrp()
-
-	# Get Open PO map (Purchase Order quantity - received quantity) - for BOTA/PTA buffer items
 	open_po_map = get_open_po_map_for_mrp()
-
-	# Get MRQ map (Material Request Quantity - sum of qty from Material Request Items with status 'Pending')
 	mrq_map = get_mrq_map_for_mrp()
+	parent_demand_map = {}
 
-	# Initialize parent demand map (for non-buffer items)
-	# This will accumulate parent demands from all BOMs
-	parent_demand_map = {}  # item_code -> total parent demand from all BOMs
-
-	# Detailed tracking for logging
 	detailed_info = {}  # item_code -> detailed information dict
-
-	# Step 1: Calculate initial order recommendations for all items
-	# Buffer: TOG - Stock - WIP
-	# Non-buffer: Open SO - Stock - WIP
 	initial_order_recommendations = {}
-
-	# Initialize detailed info for all items
 	for item_code in all_item_codes:
 		buffer_flag = item_buffer_map.get(item_code, "Non-Buffer")
 		is_buffer = buffer_flag == "Buffer"
@@ -192,7 +145,7 @@ def _generate_mrp_order_recommendations_worker():
 			"wip": wip,
 			"open_po": open_po,
 			"mrq": mrq,
-			"parent_demands": [],  # List of {parent_item, bom_name, demand_qty}
+			"parent_demands": [],
 			"total_parent_demand": 0,
 			"initial_order_rec": 0,
 			"final_order_rec": 0,
@@ -213,8 +166,6 @@ def _generate_mrp_order_recommendations_worker():
 		initial_order_recommendations[item_code] = order_rec
 		detailed_info[item_code]["initial_order_rec"] = order_rec
 
-	# Step 1.5: Apply MOQ/Batch Size to initial order recommendations for parent items
-	# This ensures parent items use net order recommendations when traversing BOMs
 	initial_net_order_recommendations = {}
 	for item_code in all_item_codes:
 		base_order_rec = initial_order_recommendations.get(item_code, 0)
@@ -223,9 +174,6 @@ def _generate_mrp_order_recommendations_worker():
 		net_order_rec = calculate_net_order_recommendation(base_order_rec, moq, batch_size)
 		initial_net_order_recommendations[item_code] = net_order_rec
 
-	# Step 2: Traverse BOMs starting from items with net order recommendations > 0
-	# We need to process all items that have initial net order recommendations
-	# Get all items with net order recommendations > 0, sorted for consistent processing
 	items_to_process = [
 		(item_code, net_order_rec)
 		for item_code, net_order_rec in initial_net_order_recommendations.items()
@@ -233,13 +181,10 @@ def _generate_mrp_order_recommendations_worker():
 	]
 	items_to_process.sort(key=lambda x: x[0])  # Sort by item_code
 
-	# Process each item with net order recommendation > 0
-	# Each traversal uses its own visited_items set to prevent circular references
-	# But parent_demand_map accumulates demands from all traversals
 	for item_code, net_order_rec in items_to_process:
 		traverse_bom_for_mrp(
 			item_code,
-			net_order_rec,  # Use net order recommendation (after MOQ/Batch Size)
+			net_order_rec,
 			item_buffer_map,
 			item_tog_map,
 			item_type_map,
@@ -252,20 +197,16 @@ def _generate_mrp_order_recommendations_worker():
 			mrq_map,
 			parent_demand_map,
 			detailed_info,
-			set(),  # visited_items for this traversal (prevents circular references)
+			set(),
 			level=0,
 		)
 
-	# Step 3: Calculate final order recommendations for all items
-	# Now parent_demand_map has accumulated all parent demands
 	final_order_recommendations = {}
 
 	for item_code in all_item_codes:
-		# Update total_parent_demand in detailed_info
 		if item_code in detailed_info:
 			detailed_info[item_code]["total_parent_demand"] = flt(parent_demand_map.get(item_code, 0))
 
-		# Calculate base order recommendation (with MRQ already subtracted)
 		order_rec = calculate_final_order_recommendation(
 			item_code,
 			item_buffer_map,
@@ -282,8 +223,7 @@ def _generate_mrp_order_recommendations_worker():
 
 		final_order_recommendations[item_code] = order_rec
 
-	# Step 4: Apply MOQ/Batch Size to get net order recommendations
-	net_order_recommendations = {}  # item_code -> net order recommendation (after MOQ/Batch Size)
+	net_order_recommendations = {}
 
 	for item_code in all_item_codes:
 		base_order_rec = final_order_recommendations.get(item_code, 0)
@@ -292,32 +232,19 @@ def _generate_mrp_order_recommendations_worker():
 		net_order_rec = calculate_net_order_recommendation(base_order_rec, moq, batch_size)
 		net_order_recommendations[item_code] = net_order_rec
 
-	# Step 5: Re-traverse BOMs using net_order_recommendations to update child requirements
-	# This ensures children get the adjusted values (after MOQ/Batch Size) from their parents
-	# Clear parent_demand_map and recalculate with net_order_recommendations
-	parent_demand_map_net = {}  # New parent demand map using net order recommendations
-
-	# Clear parent_demands from detailed_info to avoid duplicates from first traversal
-	# We'll rebuild them in the second traversal
+	parent_demand_map_net = {}
 	for item_code in all_item_codes:
 		if item_code in detailed_info:
 			detailed_info[item_code]["parent_demands"] = []
 			detailed_info[item_code]["total_parent_demand"] = 0
 
-	# Get items with net_order_recommendation > 0
-	# Only get items that are NOT children of other items (root items only)
-	# We'll traverse from root items, and children will be handled recursively
 	items_with_net_rec = [
 		(item_code, net_rec) for item_code, net_rec in net_order_recommendations.items() if net_rec > 0
 	]
-	items_with_net_rec.sort(key=lambda x: x[0])  # Sort by item_code
+	items_with_net_rec.sort(key=lambda x: x[0])
 
-	# Use a single shared visited_items set for the entire Step 5 traversal
-	# This prevents the same item from being traversed multiple times
 	global_visited_items = set()
 
-	# Re-traverse BOMs using net_order_recommendations
-	# Only traverse items that haven't been visited yet (to avoid duplicates)
 	for item_code, net_rec in items_with_net_rec:
 		if item_code not in global_visited_items:
 			traverse_bom_for_mrp_with_net_rec(
@@ -341,13 +268,10 @@ def _generate_mrp_order_recommendations_worker():
 				level=0,
 			)
 
-	# Step 6: Recalculate final order recommendations with updated parent demands
-	# Then apply MOQ/Batch Size again to get final net_order_recommendations
 	final_order_recommendations_updated = {}
 	net_order_recommendations_final = {}
 
 	for item_code in all_item_codes:
-		# Recalculate with updated parent demands
 		order_rec = calculate_final_order_recommendation(
 			item_code,
 			item_buffer_map,
@@ -359,22 +283,17 @@ def _generate_mrp_order_recommendations_worker():
 			qualified_demand_map,
 			open_po_map,
 			mrq_map,
-			parent_demand_map_net,  # Use updated parent demands
+			parent_demand_map_net,
 		)
 		final_order_recommendations_updated[item_code] = order_rec
-
-		# Apply MOQ/Batch Size again
 		moq = flt(item_moq_map.get(item_code, 0))
 		batch_size = flt(item_batch_size_map.get(item_code, 0))
 		net_order_rec = calculate_net_order_recommendation(order_rec, moq, batch_size)
 		net_order_recommendations_final[item_code] = net_order_rec
-
-		# Update detailed_info
 		if item_code in detailed_info:
 			detailed_info[item_code]["final_order_rec"] = order_rec
 			detailed_info[item_code]["net_order_rec"] = net_order_rec
 
-		# Ensure detailed_info exists for this item
 		if item_code not in detailed_info:
 			buffer_flag = item_buffer_map.get(item_code, "Non-Buffer")
 			detailed_info[item_code] = {
@@ -409,10 +328,7 @@ def _generate_mrp_order_recommendations_worker():
 			detailed_info[item_code]["moq"] = moq
 			detailed_info[item_code]["batch_size"] = batch_size
 
-		# Build calculation breakdown for ALL items (even if net_order_rec is 0)
-		# Ensure item is in detailed_info (should always be true at this point)
 		if item_code not in detailed_info:
-			# This shouldn't happen, but create it if missing
 			buffer_flag = item_buffer_map.get(item_code, "Non-Buffer")
 			detailed_info[item_code] = {
 				"item_code": item_code,
@@ -441,18 +357,14 @@ def _generate_mrp_order_recommendations_worker():
 				"MRP Generation Warning",
 			)
 
-		# Now build the breakdown for ALL items
 		info = detailed_info[item_code]
 		build_calculation_breakdown(info, parent_demand_map_net)  # Use updated parent demands
-
-		# Verify breakdown was created (for debugging)
 		if not info.get("calculation_breakdown") or not info["calculation_breakdown"].strip():
 			frappe.log_error(
 				f"Item {item_code} has empty calculation_breakdown after build_calculation_breakdown",
 				"MRP Generation Warning",
 			)
 
-	# Generate detailed log - ensure all items with net_order_rec > 0 are included
 	detailed_log = generate_detailed_log(detailed_info, net_order_recommendations_final)
 
 	# Log to console (will be visible in server logs)
@@ -1539,30 +1451,19 @@ def traverse_bom_for_mrp_with_net_rec(
 	try:
 		bom_doc = frappe.get_doc("BOM", bom)
 		bom_name = bom_doc.name
-		bom_quantity = flt(bom_doc.quantity)  # Quantity of parent item produced by this BOM
+		bom_quantity = flt(bom_doc.quantity)
 		if bom_quantity <= 0:
-			bom_quantity = 1.0  # Default to 1 if BOM quantity is 0 or negative
+			bom_quantity = 1.0
 
-		# Process each child item in BOM
 		for bom_item in bom_doc.items:
 			child_item_code = bom_item.item_code
-			bom_item_qty = flt(bom_item.qty)  # Quantity of child item needed in BOM
-
-			# Calculate required qty for child: parent_net_order_qty * (bom_item_qty / bom_quantity)
-			# This normalizes the BOM item quantity to "per unit of parent item produced"
-			# Example: If BOM produces 0.97 units of parent and needs 0.3 units of child,
-			# then for 1 unit of parent, we need: 0.3 / 0.97 units of child
-			# This uses the net_order_recommendation (after MOQ/Batch Size) of parent
+			bom_item_qty = flt(bom_item.qty)
 			normalized_bom_qty = bom_item_qty / bom_quantity
 			child_required_qty = parent_net_order_qty * normalized_bom_qty
-
-			# Check if child is buffer or non-buffer
 			child_buffer_flag = item_buffer_map.get(child_item_code, "Non-Buffer")
 			is_child_buffer = child_buffer_flag == "Buffer"
 
 			if is_child_buffer:
-				# Buffer child: Don't add parent demand (they use TOG + Qualified Demand calculation)
-				# But record it for logging
 				if child_item_code in detailed_info:
 					detailed_info[child_item_code]["parent_demands"].append(
 						{
@@ -1574,8 +1475,6 @@ def traverse_bom_for_mrp_with_net_rec(
 						}
 					)
 			else:
-				# Non-buffer child: Add parent demand to requirement
-				# Record parent demand
 				if child_item_code in detailed_info:
 					detailed_info[child_item_code]["parent_demands"].append(
 						{
@@ -1593,7 +1492,6 @@ def traverse_bom_for_mrp_with_net_rec(
 				else:
 					parent_demand_map[child_item_code] = child_required_qty
 
-				# Update total parent demand in detailed_info
 				if child_item_code in detailed_info:
 					detailed_info[child_item_code]["total_parent_demand"] = flt(
 						parent_demand_map.get(child_item_code, 0)
@@ -1723,18 +1621,12 @@ def get_wip_map_for_mrp():
 			wip_map[item_code] = flt(row.wip_qty)
 
 	elif settings.get("from_production_plan"):
-		# New logic: Get WIP from Production Plan
-		# Get all Production Plans
 		production_plans = frappe.get_all("Production Plan", filters={"docstatus": 1}, fields=["name"])
 
 		for pp in production_plans:
 			pp_name = pp.name
-
-			# Get Production Plan document to access po_items child table
 			try:
 				pp_doc = frappe.get_doc("Production Plan", pp_name)
-
-				# Check if po_items child table exists
 				if hasattr(pp_doc, "po_items") and pp_doc.po_items:
 					# Iterate through each item in po_items
 					for po_item in pp_doc.po_items:
@@ -1743,9 +1635,6 @@ def get_wip_map_for_mrp():
 
 						if not item_code:
 							continue
-
-						# Get all submitted Finished Weight documents linked to this Production Plan
-						# Get individual documents with their finish_weight values for breakdown
 						finished_weight_docs = frappe.db.sql(
 							"""
 							SELECT name, finish_weight
@@ -1760,9 +1649,6 @@ def get_wip_map_for_mrp():
 						)
 
 						total_finished_from_fw = sum(flt(doc.finish_weight) for doc in finished_weight_docs)
-
-						# Get all submitted Bright Bar Production documents linked to this Production Plan
-						# Get individual documents with their fg_weight values for breakdown
 						bright_bar_production_docs = frappe.db.sql(
 							"""
 							SELECT name, fg_weight
@@ -1968,9 +1854,6 @@ def get_open_po_map_for_mrp():
 		""",
 		as_dict=True,
 	)
-
-	# Calculate open_po for each item
-	# For each PO item: if (qty - received_qty) < 0, treat as 0, otherwise use (qty - received_qty)
 	open_po_map = {}
 	for row in po_rows:
 		item_code = row.item_code
@@ -2283,7 +2166,7 @@ def generate_detailed_log(detailed_info, net_order_recommendations):
 		lines.append("\n" + "=" * 100)
 		lines.append("ITEMS WITH PARENT DEMAND BUT ZERO NET ORDER RECOMMENDATION")
 		lines.append("=" * 100)
-		for item_code, info in items_with_parent_demand:
+		for item_code, info in items_with_parent_demand:  # noqa: B007
 			lines.append(info["calculation_breakdown"])
 			lines.append("-" * 100)
 
