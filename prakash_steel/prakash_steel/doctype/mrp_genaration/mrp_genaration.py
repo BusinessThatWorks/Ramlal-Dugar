@@ -736,7 +736,7 @@ def create_material_request(item_code, qty):
 	# Set material_request_type based on item type
 	# BB (Bright Bar) or RB (Round Bar): Manufacture
 	# All other item types: Purchase
-	if item_type in ["BB", "RB"]:
+	if item_type in ["FG", "INT"]:
 		material_request_type = "Manufacture"
 	else:
 		material_request_type = "Purchase"
@@ -1973,6 +1973,40 @@ def get_open_po_map_for_mrp():
 	# For each PO item: if (qty - received_qty) < 0, treat as 0, otherwise use (qty - received_qty)
 	open_po_map = {}
 	for row in po_rows:
+		item_code = row.item_code
+		qty = flt(row.qty)
+		received_qty = flt(row.received_qty)
+		open_qty = max(0, qty - received_qty)  # If negative, treat as 0
+
+		if item_code in open_po_map:
+			open_po_map[item_code] += open_qty
+		else:
+			open_po_map[item_code] = open_qty
+
+	# Get Subcontracting Order items for Purchase Orders with is_subcontracted = 1
+	subcontracting_rows = frappe.db.sql(
+		"""
+		SELECT
+			scoi.item_code,
+			scoi.qty,
+			IFNULL(scoi.received_qty, 0) as received_qty
+		FROM
+			`tabPurchase Order` po
+		INNER JOIN
+			`tabSubcontracting Order` sco ON sco.purchase_order = po.name
+		INNER JOIN
+			`tabSubcontracting Order Item` scoi ON scoi.parent = sco.name
+		WHERE
+			po.docstatus = 1
+			AND po.status NOT IN ('Cancelled', 'Closed')
+			AND po.is_subcontracted = 1
+			AND scoi.parentfield = 'items'
+		""",
+		as_dict=True,
+	)
+
+	# Add subcontracting order quantities to open_po_map
+	for row in subcontracting_rows:
 		item_code = row.item_code
 		qty = flt(row.qty)
 		received_qty = flt(row.received_qty)
