@@ -229,8 +229,6 @@ def update_decoupled_lead_time_for_item(item_code):
 		# This does NOT submit the document, it only updates the field
 		frappe.db.set_value("Item", item_code, "custom_decoupled_lead_time", decoupled_lead_time)
 
-		frappe.db.commit()
-
 		return decoupled_lead_time
 	except Exception as e:
 		frappe.log_error(

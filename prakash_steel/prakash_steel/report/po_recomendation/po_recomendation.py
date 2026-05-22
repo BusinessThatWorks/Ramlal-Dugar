@@ -217,7 +217,6 @@ def save_daily_on_hand_colour():
 			return
 
 		doc.insert(ignore_permissions=True)
-		frappe.db.commit()
 	except Exception as e:
 		frappe.log_error(
 			frappe.get_traceback(), "save_daily_on_hand_colour: failed to create snapshot document"

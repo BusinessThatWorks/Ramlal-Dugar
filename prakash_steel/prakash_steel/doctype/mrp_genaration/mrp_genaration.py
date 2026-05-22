@@ -644,10 +644,6 @@ def create_material_request(item_code, qty):
 
 	# Get item type from item
 	item_type = item_doc.get("custom_item_type")
-
-	# Set material_request_type based on item type
-	# BB (Bright Bar) or RB (Round Bar): Manufacture
-	# All other item types: Purchase
 	if item_type in ["FG", "INT"]:
 		material_request_type = "Manufacture"
 	else:
@@ -783,20 +779,17 @@ def create_material_requests_automatically(net_order_recommendations=None):
 			"message": f"Material Request creation job has been queued (Job ID: {job_id}). Check 'RQ Job' list to monitor progress.",
 		}
 	else:
-		# Store net_order_recommendations in cache for the worker to retrieve
-		# This is needed because enqueue might not serialize complex objects correctly
 		cache_key = f"mr_net_order_recs_{frappe.session.user}"
 		frappe.cache().set_value(cache_key, net_order_recommendations, expires_in_sec=1800)
 
-		# Enqueue as background job
 		job = frappe.enqueue(
 			"prakash_steel.prakash_steel.doctype.mrp_genaration.mrp_genaration._create_material_requests_worker",
-			net_order_recommendations=net_order_recommendations,  # Pass as parameter
+			net_order_recommendations=net_order_recommendations,
 			queue="long",
-			timeout=1800,  # 30 minutes timeout
+			timeout=1800,
 			job_name=f"MRP Material Request Creation - {frappe.session.user}",
 			is_async=True,
-			now=False,  # Ensure it's queued, not executed immediately
+			now=False,
 		)
 
 		job_id = job.id if hasattr(job, "id") else str(job)

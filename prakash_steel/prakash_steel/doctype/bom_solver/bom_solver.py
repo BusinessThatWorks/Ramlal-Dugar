@@ -161,7 +161,6 @@ def _process_single_bom(bom_name, bom_item, bom_docstatus):
 						if si_doc.status == "Unpaid" and si_doc.outstanding_amount == 0:
 							si_doc.cancel()
 							cancelled_sis.append(si_name)
-							frappe.db.commit()
 					except Exception as e:
 						# If cancellation fails, log but continue
 						error_msg = str(e)
@@ -192,7 +191,6 @@ def _process_single_bom(bom_name, bom_item, bom_docstatus):
 							if not linked_sis_for_so:
 								so_doc.cancel()
 								cancelled_sos.append(so_name)
-								frappe.db.commit()
 					except Exception as e:
 						# If cancellation fails, log but continue
 						error_msg = str(e)
@@ -242,8 +240,6 @@ def _process_single_bom(bom_name, bom_item, bom_docstatus):
 				WHERE parent = %s AND (do_not_explode IS NULL OR do_not_explode != 1)
 			""", (bom_name,))
 			
-			frappe.db.commit()
-			
 			# Reload the document to reflect SQL changes
 			bom_doc.reload()
 			changes_made = True
@@ -252,14 +248,12 @@ def _process_single_bom(bom_name, bom_item, bom_docstatus):
 		if changes_made:
 			# Save BOM
 			bom_doc.save()
-			frappe.db.commit()
 			
 			# Submit BOM if it was submitted before
 			if bom_docstatus == 1:
 				bom_doc.reload()
 				if bom_doc.docstatus == 0:
 					bom_doc.submit()
-					frappe.db.commit()
 		
 		# IMPORTANT: Re-submit cancelled documents AFTER BOM is updated/submitted
 		# This must happen even if no BOM changes were made (in case documents were canceled)
@@ -274,12 +268,10 @@ def _process_single_bom(bom_name, bom_item, bom_docstatus):
 						# Reset docstatus to draft
 						so_doc.docstatus = 0
 						so_doc.save()
-						frappe.db.commit()
 						
 						# Submit the Sales Order
 						so_doc.reload()
 						so_doc.submit()
-						frappe.db.commit()
 						re_submitted_sos.append(so_name)
 				except Exception as e:
 					error_msg = str(e)
@@ -300,12 +292,10 @@ def _process_single_bom(bom_name, bom_item, bom_docstatus):
 						# Reset docstatus to draft
 						si_doc.docstatus = 0
 						si_doc.save()
-						frappe.db.commit()
 						
 						# Submit the Sales Invoice
 						si_doc.reload()
 						si_doc.submit()
-						frappe.db.commit()
 						re_submitted_sis.append(si_name)
 				except Exception as e:
 					error_msg = str(e)
